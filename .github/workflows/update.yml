@@ -1,0 +1,111 @@
+# FF Ads Dashboard — обновление данных и публикация на GitHub Pages.
+# Файл кладётся в ПУБЛИЧНЫЙ репозиторий сайта (onlinefarmaciaff/ffads-site) как
+# .github/workflows/update.yml. Код сборщика берётся из приватного репозитория по ключу
+# развёртывания (только чтение). Порядок настройки — docs/GITHUB.md.
+#
+# Журнал этого workflow виден всем: сборщик пишет в него только итоги без секретов и данных.
+# Публикуется ветка gh-pages: страница, data.enc (по паролю) и state/history.enc (ключ HISTORY_KEY).
+# Ветка каждый раз заменяется одним коммитом, чтобы репозиторий не рос.
+name: Обновление дашборда
+
+on:
+  schedule:
+    # Будни, каждый час 05:00–15:00 UTC = 8:00–17:00 по Кишинёву (зимой и летом);
+    # запуски вне 8:00–17:00 местного времени завершаются сразу.
+    - cron: '0 5-15 * * 1-5'
+  workflow_dispatch:
+    inputs:
+      history:
+        description: 'Загрузить историю заново (36 месяцев, ~15 минут)'
+        type: boolean
+        default: false
+
+concurrency:
+  group: ffads-update
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  update:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      CODE_REPO: ${{ vars.CODE_REPO || 'onlinefarmaciaff/dashboard_marketing' }}
+      CODE_REF: ${{ vars.CODE_REF || 'main' }}
+    steps:
+      - name: Код сборщика (приватный репозиторий, только чтение)
+        env:
+          CODE_DEPLOY_KEY: ${{ secrets.CODE_DEPLOY_KEY }}
+        run: |
+          set -euo pipefail
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$CODE_DEPLOY_KEY" > ~/.ssh/code_key
+          chmod 600 ~/.ssh/code_key
+          # Опубликованный ключ сервера github.com (docs.github.com, «GitHub's SSH key fingerprints»).
+          echo 'github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl' > ~/.ssh/known_hosts
+          GIT_SSH_COMMAND='ssh -i ~/.ssh/code_key -o IdentitiesOnly=yes' \
+            git clone -q --depth 1 --branch "$CODE_REF" "git@github.com:${CODE_REPO}.git" code
+          rm -f ~/.ssh/code_key
+          node --version
+
+      - name: Текущая история (ветка gh-pages)
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p out/state
+          if git clone -q --depth 1 --branch gh-pages "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" prev 2>/dev/null \
+             && [ -f prev/state/history.enc ]; then
+            cp prev/state/history.enc out/state/history.enc
+            echo "История найдена"
+          else
+            echo "Истории нет — будет загружена заново"
+          fi
+
+      - name: Сбор данных и сборка сайта
+        id: build
+        env:
+          DASHBOARD_PASSPHRASE: ${{ secrets.DASHBOARD_PASSPHRASE }}
+          HISTORY_KEY: ${{ secrets.HISTORY_KEY }}
+          META_TOKEN: ${{ secrets.META_TOKEN }}
+          GOOGLE_ADS_JSON: ${{ secrets.GOOGLE_ADS_JSON }}
+          ADMIXER_TOKEN: ${{ secrets.ADMIXER_TOKEN }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          BUDGET_SHEET_ID: ${{ vars.BUDGET_SHEET_ID }}
+          BUDGET_SHEET_RANGE: ${{ vars.BUDGET_SHEET_RANGE }}
+          META_ACCOUNT_IDS: ${{ vars.META_ACCOUNT_IDS }}
+          GOOGLE_ADS_LOGIN_CUSTOMER_ID: ${{ vars.GOOGLE_ADS_LOGIN_CUSTOMER_ID }}
+          GOOGLE_ADS_CUSTOMER_IDS: ${{ vars.GOOGLE_ADS_CUSTOMER_IDS }}
+          ADMIXER_PATH: ${{ vars.ADMIXER_PATH }}
+          ADMIXER_ACCOUNT_IDS: ${{ vars.ADMIXER_ACCOUNT_IDS }}
+          ADMIXER_CURRENCY: ${{ vars.ADMIXER_CURRENCY }}
+          ADMIXER_AUTH_SCHEME: ${{ vars.ADMIXER_AUTH_SCHEME }}
+          META_PURCHASE_CONFIGURED: ${{ vars.META_PURCHASE_CONFIGURED }}
+          HISTORY_FLAG: ${{ inputs.history && '--history' || '' }}
+        run: |
+          set -euo pipefail
+          # Секреты платформ — файлами во временной папке, как /run/secrets у сборщика на сервере.
+          export SECRETS_DIR="$RUNNER_TEMP/secrets"
+          install -m 700 -d "$SECRETS_DIR"
+          write() { if [ -n "$2" ]; then (umask 077; printf '%s' "$2" > "$SECRETS_DIR/$1"); fi; }
+          write meta_token "$META_TOKEN"
+          write google_ads.json "$GOOGLE_ADS_JSON"
+          write admixer_token "$ADMIXER_TOKEN"
+          write google_service_account.json "$GOOGLE_SERVICE_ACCOUNT_JSON"
+          node code/collector/src/site/build.js --state out/state/history.enc --out out --event "$GITHUB_EVENT_NAME" $HISTORY_FLAG
+          rm -rf "$SECRETS_DIR"
+
+      - name: Публикация (ветка gh-pages)
+        if: steps.build.outputs.publish == 'true'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cd out
+          git init -q -b gh-pages
+          git add -A
+          git -c user.name='ffads-bot' -c user.email='ffads-bot@users.noreply.github.com' commit -q -m "Данные на $(date -u +%Y-%m-%dT%H:%MZ)"
+          git push -q -f "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" gh-pages
+          echo "Опубликовано"
