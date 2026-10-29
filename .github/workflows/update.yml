@@ -71,18 +71,20 @@ jobs:
           HISTORY_KEY: ${{ secrets.HISTORY_KEY }}
           META_TOKEN: ${{ secrets.META_TOKEN }}
           GOOGLE_ADS_JSON: ${{ secrets.GOOGLE_ADS_JSON }}
-          ADMIXER_TOKEN: ${{ secrets.ADMIXER_TOKEN }}
+          ADMIXER_USERNAME: ${{ secrets.ADMIXER_USERNAME }}
+          ADMIXER_PASSWORD: ${{ secrets.ADMIXER_PASSWORD }}
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
           BUDGET_SHEET_ID: ${{ vars.BUDGET_SHEET_ID }}
           BUDGET_SHEET_RANGE: ${{ vars.BUDGET_SHEET_RANGE }}
           META_ACCOUNT_IDS: ${{ vars.META_ACCOUNT_IDS }}
           GOOGLE_ADS_LOGIN_CUSTOMER_ID: ${{ vars.GOOGLE_ADS_LOGIN_CUSTOMER_ID }}
           GOOGLE_ADS_CUSTOMER_IDS: ${{ vars.GOOGLE_ADS_CUSTOMER_IDS }}
-          ADMIXER_PATH: ${{ vars.ADMIXER_PATH }}
-          ADMIXER_ACCOUNT_IDS: ${{ vars.ADMIXER_ACCOUNT_IDS }}
+          ADMIXER_HOST: ${{ vars.ADMIXER_HOST }}
           ADMIXER_CURRENCY: ${{ vars.ADMIXER_CURRENCY }}
-          ADMIXER_AUTH_SCHEME: ${{ vars.ADMIXER_AUTH_SCHEME }}
+          ADMIXER_SPEND_FIELD: ${{ vars.ADMIXER_SPEND_FIELD }}
+          ADMIXER_PAUSE_MS: ${{ vars.ADMIXER_PAUSE_MS }}
           META_PURCHASE_CONFIGURED: ${{ vars.META_PURCHASE_CONFIGURED }}
+          HISTORY_MONTHS: ${{ vars.HISTORY_MONTHS }}
           HISTORY_FLAG: ${{ inputs.history && '--history' || '' }}
         run: |
           set -euo pipefail
@@ -92,7 +94,8 @@ jobs:
           write() { if [ -n "$2" ]; then (umask 077; printf '%s' "$2" > "$SECRETS_DIR/$1"); fi; }
           write meta_token "$META_TOKEN"
           write google_ads.json "$GOOGLE_ADS_JSON"
-          write admixer_token "$ADMIXER_TOKEN"
+          write admixer_username "$ADMIXER_USERNAME"
+          write admixer_password "$ADMIXER_PASSWORD"
           write google_service_account.json "$GOOGLE_SERVICE_ACCOUNT_JSON"
           node code/collector/src/site/build.js --state out/state/history.enc --out out --event "$GITHUB_EVENT_NAME" $HISTORY_FLAG
           rm -rf "$SECRETS_DIR"
