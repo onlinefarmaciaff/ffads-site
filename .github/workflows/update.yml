@@ -10,9 +10,10 @@ name: Обновление дашборда
 
 on:
   schedule:
-    # Будни, каждый час 05:00–15:00 UTC = 8:00–17:00 по Кишинёву (зимой и летом);
-    # запуски вне 8:00–17:00 местного времени завершаются сразу.
-    - cron: '0 5-15 * * 1-5'
+    # Будни, каждый час в :17, 05–15 UTC = 8–17 часов по Кишинёву (зимой и летом);
+    # запуски вне 8:00–17:59 местного времени завершаются сразу. Минута не :00 — в начале
+    # часа у GitHub пик нагрузки, плановые запуски задерживаются или пропускаются.
+    - cron: '17 5-15 * * 1-5'
   workflow_dispatch:
     inputs:
       history:
@@ -50,18 +51,45 @@ jobs:
           rm -f ~/.ssh/code_key
           node --version
 
+      # Тесты без внешних зависимостей (без npm install): расчёты, шифрование, сборка сайта,
+      # разбор ответов API на имитации. Тесты с PostgreSQL относятся к варианту с сервером.
+      # Секретов в этом шаге нет; при ошибке данные не собираются и не публикуются.
+      - name: Тесты сборщика и страницы
+        working-directory: code
+        run: >-
+          node --test
+          collector/test/lib.test.js collector/test/site.test.js collector/test/sources.test.js
+          dashboard/test/frontend.test.js dashboard/test/unit.test.js
+
+      # Ветки gh-pages нет — первый запуск, история загружается заново. Ветка есть, но не
+      # клонируется или в ней нет истории — запуск останавливается: иначе сборщик начал бы
+      # с пустой истории и затёр бы её публикацией. Начать заново — Run workflow с галочкой.
       - name: Текущая история (ветка gh-pages)
         env:
           GITHUB_TOKEN: ${{ github.token }}
+          RELOAD: ${{ inputs.history && 'true' || 'false' }}
         run: |
           set -euo pipefail
           mkdir -p out/state
-          if git clone -q --depth 1 --branch gh-pages "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" prev 2>/dev/null \
-             && [ -f prev/state/history.enc ]; then
+          url="https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          rc=0
+          git ls-remote --exit-code --heads "$url" gh-pages > /dev/null || rc=$?
+          if [ "$rc" -eq 2 ]; then
+            echo "Ветки gh-pages нет — история будет загружена заново"
+            exit 0
+          elif [ "$rc" -ne 0 ]; then
+            echo "::error::Не удалось проверить ветку gh-pages (git ls-remote, код $rc) — запуск остановлен, история не тронута"
+            exit 1
+          fi
+          git clone -q --depth 1 --branch gh-pages "$url" prev
+          if [ -f prev/state/history.enc ]; then
             cp prev/state/history.enc out/state/history.enc
             echo "История найдена"
+          elif [ "$RELOAD" = 'true' ]; then
+            echo "В gh-pages нет истории — загружается заново (по запросу)"
           else
-            echo "Истории нет — будет загружена заново"
+            echo "::error::В ветке gh-pages нет state/history.enc — запуск остановлен. Загрузить историю заново: Run workflow с галочкой"
+            exit 1
           fi
 
       - name: Сбор данных и сборка сайта
@@ -85,6 +113,11 @@ jobs:
           ADMIXER_PAUSE_MS: ${{ vars.ADMIXER_PAUSE_MS }}
           META_PURCHASE_CONFIGURED: ${{ vars.META_PURCHASE_CONFIGURED }}
           HISTORY_MONTHS: ${{ vars.HISTORY_MONTHS }}
+          # Версии API (по умолчанию — в collector/src/config.js) и окна перезаписи данных.
+          META_API_VERSION: ${{ vars.META_API_VERSION }}
+          GOOGLE_ADS_API_VERSION: ${{ vars.GOOGLE_ADS_API_VERSION }}
+          SYNC_DAYS: ${{ vars.SYNC_DAYS }}
+          NBM_DAYS: ${{ vars.NBM_DAYS }}
           HISTORY_FLAG: ${{ inputs.history && '--history' || '' }}
         run: |
           set -euo pipefail
@@ -97,8 +130,14 @@ jobs:
           write admixer_username "$ADMIXER_USERNAME"
           write admixer_password "$ADMIXER_PASSWORD"
           write google_service_account.json "$GOOGLE_SERVICE_ACCOUNT_JSON"
-          node code/collector/src/site/build.js --state out/state/history.enc --out out --event "$GITHUB_EVENT_NAME" $HISTORY_FLAG
+          node code/collector/src/site/build.js --state out/state/history.enc --out out --event "$GITHUB_EVENT_NAME" $HISTORY_FLAG \
+            | tee "$RUNNER_TEMP/build.log"
           rm -rf "$SECRETS_DIR"
+          # Источники с ошибкой (sync_failed): сайт всё равно публикуется — их данные в истории
+          # не меняются, а недогруженные периоды сохраняются для повтора, — но запуск в конце
+          # отмечается ошибкой, чтобы GitHub прислал письмо.
+          failed=$(grep '"msg":"sync_failed"' "$RUNNER_TEMP/build.log" | grep -o '"source":"[a-z]*"' | cut -d'"' -f4 | sort -u | paste -sd ' ' || true)
+          echo "failed_sources=$failed" >> "$GITHUB_OUTPUT"
 
       - name: Публикация (ветка gh-pages)
         if: steps.build.outputs.publish == 'true'
@@ -112,3 +151,11 @@ jobs:
           git -c user.name='ffads-bot' -c user.email='ffads-bot@users.noreply.github.com' commit -q -m "Данные на $(date -u +%Y-%m-%dT%H:%MZ)"
           git push -q -f "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" gh-pages
           echo "Опубликовано"
+
+      - name: Проверка источников
+        if: steps.build.outputs.failed_sources != ''
+        env:
+          FAILED: ${{ steps.build.outputs.failed_sources }}
+        run: |
+          echo "::error::Не обновились источники: $FAILED — причина в журнале шага «Сбор данных и сборка сайта» (docs/CONNECT.md)"
+          exit 1
