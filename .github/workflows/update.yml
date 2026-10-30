@@ -1,7 +1,7 @@
 # FF Ads Dashboard — обновление данных и публикация на GitHub Pages.
 # Файл кладётся в ПУБЛИЧНЫЙ репозиторий сайта (onlinefarmaciaff/ffads-site) как
 # .github/workflows/update.yml. Код сборщика берётся из приватного репозитория по ключу
-# развёртывания (только чтение). Порядок настройки — docs/GITHUB.md.
+# развёртывания (только чтение), закреплённым коммитом CODE_SHA. Порядок настройки — docs/GITHUB.md.
 #
 # Журнал этого workflow виден всем: сборщик пишет в него только итоги без секретов и данных.
 # Публикуется ветка gh-pages: страница, data.enc (по паролю) и state/history.enc (ключ HISTORY_KEY).
@@ -34,7 +34,10 @@ jobs:
     timeout-minutes: 60
     env:
       CODE_REPO: ${{ vars.CODE_REPO || 'onlinefarmaciaff/dashboard_marketing' }}
-      CODE_REF: ${{ vars.CODE_REF || 'main' }}
+      # Код сборщика — закреплённый коммит, а не ветка: изменения в репозитории кода попадают
+      # на дашборд только после замены этого SHA (отдельный PR в ffads-site). Полный SHA —
+      # dashboard_marketing → Commits → копировать у нужного коммита ветки main.
+      CODE_SHA: f1996b09f504e52f15eb758e48f720d2e8ef38d1
     steps:
       - name: Код сборщика (приватный репозиторий, только чтение)
         env:
@@ -46,9 +49,17 @@ jobs:
           chmod 600 ~/.ssh/code_key
           # Опубликованный ключ сервера github.com (docs.github.com, «GitHub's SSH key fingerprints»).
           echo 'github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl' > ~/.ssh/known_hosts
+          if ! [[ "$CODE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::CODE_SHA: нужен полный SHA коммита (40 символов 0-9a-f)"
+            exit 1
+          fi
+          git init -q code
+          git -C code remote add origin "git@github.com:${CODE_REPO}.git"
           GIT_SSH_COMMAND='ssh -i ~/.ssh/code_key -o IdentitiesOnly=yes' \
-            git clone -q --depth 1 --branch "$CODE_REF" "git@github.com:${CODE_REPO}.git" code
+            git -C code fetch -q --depth 1 origin "$CODE_SHA"
+          git -C code checkout -q --detach FETCH_HEAD
           rm -f ~/.ssh/code_key
+          echo "Код: ${CODE_REPO}@$(git -C code rev-parse HEAD)"
           node --version
 
       # Тесты без внешних зависимостей (без npm install): расчёты, шифрование, сборка сайта,
