@@ -45,7 +45,7 @@ jobs:
       # Код сборщика — закреплённый коммит, а не ветка: изменения в репозитории кода попадают
       # на дашборд только после замены этого SHA (отдельный PR в ffads-site). Полный SHA —
       # dashboard_marketing → Commits → копировать у нужного коммита ветки main.
-      CODE_SHA: b5c9596c10b912e6627cd864134de1ae6e3022f7
+      CODE_SHA: 719e1bd6b58b2b71fc0e191733f80ee5b787f783
     steps:
       - name: Код сборщика (приватный репозиторий, только чтение)
         env:
@@ -125,6 +125,9 @@ jobs:
           SHOPIFY_CLIENT_SECRET: ${{ secrets.SHOPIFY_CLIENT_SECRET }}
           SHOPIFY_SHOP: ${{ vars.SHOPIFY_SHOP }}
           SHOPIFY_API_VERSION: ${{ vars.SHOPIFY_API_VERSION }}
+          OMNISEND_API_KEY: ${{ secrets.OMNISEND_API_KEY }}
+          OMNISEND_CURRENCY: ${{ vars.OMNISEND_CURRENCY }}
+          OMNISEND_API_VERSION: ${{ vars.OMNISEND_API_VERSION }}
           BUDGET_SHEET_ID: ${{ vars.BUDGET_SHEET_ID }}
           BUDGET_SHEET_RANGE: ${{ vars.BUDGET_SHEET_RANGE }}
           META_ACCOUNT_IDS: ${{ vars.META_ACCOUNT_IDS }}
@@ -156,6 +159,7 @@ jobs:
           write google_service_account.json "$GOOGLE_SERVICE_ACCOUNT_JSON"
           write shopify_client_id "$SHOPIFY_CLIENT_ID"
           write shopify_client_secret "$SHOPIFY_CLIENT_SECRET"
+          write omnisend_api_key "$OMNISEND_API_KEY"
           node code/collector/src/site/build.js --state out/state/history.enc --out out --event "$GITHUB_EVENT_NAME" $HISTORY_FLAG \
             | tee "$RUNNER_TEMP/build.log"
           rm -rf "$SECRETS_DIR"
