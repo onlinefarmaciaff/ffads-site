@@ -14,10 +14,18 @@ on:
     # запуски вне 8:00–17:59 местного времени завершаются сразу. Минута не :00 — в начале
     # часа у GitHub пик нагрузки, плановые запуски задерживаются или пропускаются.
     - cron: '17 5-15 * * 1-5'
+    # Понедельник, 8:47 / 9:47 по Кишинёву: перезапись последних RESYNC_DAYS дней. Платформы
+    # досчитывают конверсии задним числом (Google — до 30–90 дней после клика), а обычный
+    # запуск перезаписывает только последние SYNC_DAYS (7) дней.
+    - cron: '47 6 * * 1'
   workflow_dispatch:
     inputs:
       history:
         description: 'Загрузить историю заново (36 месяцев, ~15 минут)'
+        type: boolean
+        default: false
+      resync:
+        description: 'Перезаписать последние 60 дней (досчитанные конверсии)'
         type: boolean
         default: false
 
@@ -127,7 +135,8 @@ jobs:
           # Версии API (по умолчанию — в collector/src/config.js) и окна перезаписи данных.
           META_API_VERSION: ${{ vars.META_API_VERSION }}
           GOOGLE_ADS_API_VERSION: ${{ vars.GOOGLE_ADS_API_VERSION }}
-          SYNC_DAYS: ${{ vars.SYNC_DAYS }}
+          # Еженедельный запуск или галочка resync — RESYNC_DAYS дней (по умолчанию 60, максимум 60).
+          SYNC_DAYS: ${{ (github.event.schedule == '47 6 * * 1' || inputs.resync) && (vars.RESYNC_DAYS || '60') || vars.SYNC_DAYS }}
           NBM_DAYS: ${{ vars.NBM_DAYS }}
           HISTORY_FLAG: ${{ inputs.history && '--history' || '' }}
         run: |
