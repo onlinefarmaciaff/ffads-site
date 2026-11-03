@@ -43,7 +43,7 @@ jobs:
       # Код сборщика — закреплённый коммит, а не ветка: изменения в репозитории кода попадают
       # на дашборд только после замены этого SHA (отдельный PR в ffads-site). Полный SHA —
       # dashboard_marketing → Commits → копировать у нужного коммита ветки main.
-      CODE_SHA: d922e22b00d8e23d4a90786b77732f17757222a9
+      CODE_SHA: 72ecbe26e6bbb34e3597fe0011a28485fa236941
     steps:
       - name: Код сборщика (приватный репозиторий, только чтение)
         env:
@@ -168,7 +168,7 @@ jobs:
           # Источники с ошибкой (sync_failed): сайт всё равно публикуется — их данные в истории
           # не меняются, а недогруженные периоды сохраняются для повтора, — но запуск в конце
           # отмечается ошибкой, чтобы GitHub прислал письмо.
-          failed=$(grep '"msg":"sync_failed"' "$RUNNER_TEMP/build.log" | grep -o '"source":"[a-z]*"' | cut -d'"' -f4 | sort -u | paste -sd ' ' || true)
+          failed=$(grep '"msg":"sync_failed"' "$RUNNER_TEMP/build.log" | grep -o '"source":"[a-z0-9_]*"' | cut -d'"' -f4 | sort -u | paste -sd ' ' || true)
           echo "failed_sources=$failed" >> "$GITHUB_OUTPUT"
 
       - name: Публикация (ветка gh-pages)
