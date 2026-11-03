@@ -43,7 +43,7 @@ jobs:
       # Код сборщика — закреплённый коммит, а не ветка: изменения в репозитории кода попадают
       # на дашборд только после замены этого SHA (отдельный PR в ffads-site). Полный SHA —
       # dashboard_marketing → Commits → копировать у нужного коммита ветки main.
-      CODE_SHA: 2a025a65fa2f8425b5c8602f06d389b5e7f397df
+      CODE_SHA: bc2f36e5f70fa0d6c23c69afb289a587b1216796
     steps:
       - name: Код сборщика (приватный репозиторий, только чтение)
         env:
@@ -126,6 +126,7 @@ jobs:
           OMNISEND_API_KEY: ${{ secrets.OMNISEND_API_KEY }}
           OMNISEND_CURRENCY: ${{ vars.OMNISEND_CURRENCY }}
           OMNISEND_API_VERSION: ${{ vars.OMNISEND_API_VERSION }}
+          GA4_PROPERTY_ID: ${{ vars.GA4_PROPERTY_ID }}
           BUDGET_SHEET_ID: ${{ vars.BUDGET_SHEET_ID }}
           BUDGET_SHEET_RANGE: ${{ vars.BUDGET_SHEET_RANGE }}
           META_ACCOUNT_IDS: ${{ vars.META_ACCOUNT_IDS }}
