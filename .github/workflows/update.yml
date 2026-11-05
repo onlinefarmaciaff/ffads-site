@@ -43,7 +43,7 @@ jobs:
       # Код сборщика — закреплённый коммит, а не ветка: изменения в репозитории кода попадают
       # на дашборд только после замены этого SHA (отдельный PR в ffads-site). Полный SHA —
       # dashboard_marketing → Commits → копировать у нужного коммита ветки main.
-      CODE_SHA: 12845f60160bebd49a752fb4936df932c138c763
+      CODE_SHA: 986e7ca0aab1f9481cedad0eda010d6f08464ae1
     steps:
       - name: Код сборщика (приватный репозиторий, только чтение)
         env:
@@ -127,6 +127,9 @@ jobs:
           SHOPIFY_API_VERSION: ${{ vars.SHOPIFY_API_VERSION }}
           OMNISEND_API_KEY: ${{ secrets.OMNISEND_API_KEY }}
           DATAEDGE_TOKEN: ${{ secrets.DATAEDGE_TOKEN }}
+          AHREFS_API_KEY: ${{ secrets.AHREFS_API_KEY }}
+          AHREFS_TARGET: ${{ vars.AHREFS_TARGET }}
+          AHREFS_PROJECT_ID: ${{ vars.AHREFS_PROJECT_ID }}
           OMNISEND_CURRENCY: ${{ vars.OMNISEND_CURRENCY }}
           OMNISEND_API_VERSION: ${{ vars.OMNISEND_API_VERSION }}
           GA4_PROPERTY_ID: ${{ vars.GA4_PROPERTY_ID }}
@@ -168,6 +171,7 @@ jobs:
           write shopify_client_secret "$SHOPIFY_CLIENT_SECRET"
           write omnisend_api_key "$OMNISEND_API_KEY"
           write dataedge_token "$DATAEDGE_TOKEN"
+          write ahrefs_api_key "$AHREFS_API_KEY"
           node code/collector/src/site/build.js --state out/state/history.enc --out out --event "$GITHUB_EVENT_NAME" $HISTORY_FLAG \
             | tee "$RUNNER_TEMP/build.log"
           rm -rf "$SECRETS_DIR"
