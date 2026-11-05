@@ -43,7 +43,7 @@ jobs:
       # Код сборщика — закреплённый коммит, а не ветка: изменения в репозитории кода попадают
       # на дашборд только после замены этого SHA (отдельный PR в ffads-site). Полный SHA —
       # dashboard_marketing → Commits → копировать у нужного коммита ветки main.
-      CODE_SHA: 0295af38876ffc5e347ef77c4876b662ef4115ae
+      CODE_SHA: 768503d954c7a9a9e5e5992a13b69726adfcb221
     steps:
       - name: Код сборщика (приватный репозиторий, только чтение)
         env:
@@ -51,6 +51,8 @@ jobs:
         run: |
           set -euo pipefail
           install -m 700 -d ~/.ssh
+          # Ключ удаляется при любом выходе из шага, и при ошибке тоже.
+          trap 'rm -f ~/.ssh/code_key' EXIT
           printf '%s\n' "$CODE_DEPLOY_KEY" > ~/.ssh/code_key
           chmod 600 ~/.ssh/code_key
           # Опубликованный ключ сервера github.com (docs.github.com, «GitHub's SSH key fingerprints»).
