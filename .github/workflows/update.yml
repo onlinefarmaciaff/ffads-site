@@ -43,7 +43,7 @@ jobs:
       # Код сборщика — закреплённый коммит, а не ветка: изменения в репозитории кода попадают
       # на дашборд только после замены этого SHA (отдельный PR в ffads-site). Полный SHA —
       # dashboard_marketing → Commits → копировать у нужного коммита ветки main.
-      CODE_SHA: dc7f28292e976e099101da06795d49c5684c02cf
+      CODE_SHA: bd1727b546c7f7aba4e4be89738dbbea9a6557c1
     steps:
       - name: Код сборщика (приватный репозиторий, только чтение)
         env:
@@ -126,6 +126,7 @@ jobs:
           SHOPIFY_SHOP: ${{ vars.SHOPIFY_SHOP }}
           SHOPIFY_API_VERSION: ${{ vars.SHOPIFY_API_VERSION }}
           OMNISEND_API_KEY: ${{ secrets.OMNISEND_API_KEY }}
+          DATAEDGE_TOKEN: ${{ secrets.DATAEDGE_TOKEN }}
           OMNISEND_CURRENCY: ${{ vars.OMNISEND_CURRENCY }}
           OMNISEND_API_VERSION: ${{ vars.OMNISEND_API_VERSION }}
           GA4_PROPERTY_ID: ${{ vars.GA4_PROPERTY_ID }}
@@ -166,6 +167,7 @@ jobs:
           write shopify_client_id "$SHOPIFY_CLIENT_ID"
           write shopify_client_secret "$SHOPIFY_CLIENT_SECRET"
           write omnisend_api_key "$OMNISEND_API_KEY"
+          write dataedge_token "$DATAEDGE_TOKEN"
           node code/collector/src/site/build.js --state out/state/history.enc --out out --event "$GITHUB_EVENT_NAME" $HISTORY_FLAG \
             | tee "$RUNNER_TEMP/build.log"
           rm -rf "$SECRETS_DIR"
