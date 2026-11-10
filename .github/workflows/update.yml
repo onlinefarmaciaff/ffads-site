@@ -43,7 +43,7 @@ jobs:
       # Код сборщика — закреплённый коммит, а не ветка: изменения в репозитории кода попадают
       # на дашборд только после замены этого SHA (отдельный PR в ffads-site). Полный SHA —
       # dashboard_marketing → Commits → копировать у нужного коммита ветки main.
-      CODE_SHA: be7b4eb8e5582fe54914fe93a85855647461640b
+      CODE_SHA: 72b4c13067237094010b005cf40bcf10beb5873b
     steps:
       - name: Код сборщика (приватный репозиторий, только чтение)
         env:
@@ -135,6 +135,7 @@ jobs:
           GA4_PROPERTY_ID: ${{ vars.GA4_PROPERTY_ID }}
           GA4_SOURCE_DIMENSION: ${{ vars.GA4_SOURCE_DIMENSION }}
           GSC_SITE_URL: ${{ vars.GSC_SITE_URL }}
+          DATAEDGE_SHEET_ID: ${{ vars.DATAEDGE_SHEET_ID }}
           GSC_BRAND_REGEX: ${{ vars.GSC_BRAND_REGEX }}
           BUDGET_SHEET_ID: ${{ vars.BUDGET_SHEET_ID }}
           BUDGET_SHEET_RANGE: ${{ vars.BUDGET_SHEET_RANGE }}
