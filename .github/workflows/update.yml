@@ -43,7 +43,7 @@ jobs:
       # Код сборщика — закреплённый коммит, а не ветка: изменения в репозитории кода попадают
       # на дашборд только после замены этого SHA (отдельный PR в ffads-site). Полный SHA —
       # dashboard_marketing → Commits → копировать у нужного коммита ветки main.
-      CODE_SHA: 7cf898566918794faba07995dd2918cad5906484
+      CODE_SHA: 7189e0c6a916b5de11ba437a96ed8c21f5f10d61
     steps:
       - name: Код сборщика (приватный репозиторий, только чтение)
         env:
@@ -129,6 +129,7 @@ jobs:
           DATAEDGE_TOKEN: ${{ secrets.DATAEDGE_TOKEN }}
           AHREFS_API_KEY: ${{ secrets.AHREFS_API_KEY }}
           GBP_OAUTH_JSON: ${{ secrets.GBP_OAUTH_JSON }}
+          ONESIGNAL_API_KEY: ${{ secrets.ONESIGNAL_API_KEY }}
           AHREFS_TARGET: ${{ vars.AHREFS_TARGET }}
           AHREFS_PROJECT_ID: ${{ vars.AHREFS_PROJECT_ID }}
           OMNISEND_CURRENCY: ${{ vars.OMNISEND_CURRENCY }}
@@ -137,6 +138,8 @@ jobs:
           GA4_SOURCE_DIMENSION: ${{ vars.GA4_SOURCE_DIMENSION }}
           GSC_SITE_URL: ${{ vars.GSC_SITE_URL }}
           DATAEDGE_SHEET_ID: ${{ vars.DATAEDGE_SHEET_ID }}
+          # App ID приложения FF в OneSignal (не секрет — есть в самом приложении); переменная ONESIGNAL_APP_ID его заменяет.
+          ONESIGNAL_APP_ID: ${{ vars.ONESIGNAL_APP_ID || 'ed531d1d-e455-4de3-b504-082645cd7520' }}
           GSC_BRAND_REGEX: ${{ vars.GSC_BRAND_REGEX }}
           BUDGET_SHEET_ID: ${{ vars.BUDGET_SHEET_ID }}
           BUDGET_SHEET_RANGE: ${{ vars.BUDGET_SHEET_RANGE }}
@@ -175,6 +178,7 @@ jobs:
           write dataedge_token "$DATAEDGE_TOKEN"
           write ahrefs_api_key "$AHREFS_API_KEY"
           write gbp_oauth.json "$GBP_OAUTH_JSON"
+          write onesignal_api_key "$ONESIGNAL_API_KEY"
           node code/collector/src/site/build.js --state out/state/history.enc --out out --event "$GITHUB_EVENT_NAME" $HISTORY_FLAG \
             | tee "$RUNNER_TEMP/build.log"
           rm -rf "$SECRETS_DIR"
