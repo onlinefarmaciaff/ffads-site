@@ -1,0 +1,1037 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <meta name="robots" content="noindex, nofollow">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'self'; connect-src 'self'; manifest-src 'self'; form-action 'none'; base-uri 'none'">
+  <meta name="referrer" content="same-origin">
+  <title>FF Ads Dashboard</title>
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="a-1cb48d350dea/css/app.css">
+  <link rel="stylesheet" href="a-1cb48d350dea/css/site.css">
+  <script src="a-1cb48d350dea/js/theme.js"></script>
+  <script src="a-1cb48d350dea/vendor/chart.umd.min.js" defer></script>
+  <script type="module" src="a-1cb48d350dea/js/app.js"></script>
+</head>
+<body>
+  <div class="unlock" id="unlock" hidden>
+    <section class="card login-card" aria-labelledby="unlock-title">
+      <div><div class="logo" role="img" aria-label="Farmacia Familiei — Ads Dashboard"><span>Ads Dashboard</span></div></div>
+      <h1 id="unlock-title">Sign in</h1>
+      <p class="muted">The data is encrypted. Enter the password to decrypt it right in this browser.</p>
+      <form id="unlock-form" autocomplete="on">
+        <input type="text" name="username" value="ffads" autocomplete="username" hidden>
+        <label class="field" for="unlock-password">
+          <span>Password</span>
+          <input id="unlock-password" type="password" autocomplete="current-password" required maxlength="256">
+        </label>
+        <label class="remember"><input type="checkbox" id="unlock-remember"> Remember on this device</label>
+        <p class="login-error" id="unlock-error" role="alert" hidden></p>
+        <button class="btn btn-primary" type="submit" id="unlock-submit">Sign in</button>
+      </form>
+    </section>
+  </div>
+  <div class="brand-strip" aria-hidden="true"></div>
+  <header class="topbar">
+    <div class="logo" role="img" aria-label="Farmacia Familiei — Ads Dashboard"><span>Ads Dashboard</span></div>
+    <nav class="tabs" id="tabs" role="tablist" aria-label="Sections">
+      <button class="tab" type="button" role="tab" data-view="overview" aria-selected="true">Overview</button>
+      <button class="tab" type="button" role="tab" data-view="meta" aria-selected="false"><span class="swatch swatch-meta" aria-hidden="true"></span>Meta</button>
+      <button class="tab" type="button" role="tab" data-view="google" aria-selected="false"><span class="swatch swatch-google" aria-hidden="true"></span>Google Ads</button>
+      <button class="tab" type="button" role="tab" data-view="admixer" aria-selected="false"><span class="swatch swatch-admixer" aria-hidden="true"></span>Admixer</button>
+      <button class="tab" type="button" role="tab" data-view="shopify" aria-selected="false" hidden><span class="swatch swatch-shopify" aria-hidden="true"></span>Shopify</button>
+      <button class="tab" type="button" role="tab" data-view="omnisend" aria-selected="false" hidden><span class="swatch swatch-omnisend" aria-hidden="true"></span>Omnisend</button>
+      <button class="tab" type="button" role="tab" data-view="seo" aria-selected="false" hidden><span class="swatch swatch-seo" aria-hidden="true"></span>SEO</button>
+      <button class="tab" type="button" role="tab" data-view="dataedge" aria-selected="false" hidden><span class="swatch swatch-dataedge" aria-hidden="true"></span>SMS / Viber</button>
+      <button class="tab" type="button" role="tab" data-view="maps" aria-selected="false" hidden><span class="swatch swatch-maps" aria-hidden="true"></span>Google Maps</button>
+      <button class="tab" type="button" role="tab" data-view="onesignal" aria-selected="false" hidden><span class="swatch swatch-onesignal" aria-hidden="true"></span>App push</button>
+    </nav>
+    <div class="topbar-actions">
+      <ul class="sources" id="sources" aria-label="Data sources with update errors"></ul>
+      <button class="btn btn-icon" id="theme-toggle" type="button" aria-label="Toggle light or dark theme" title="Light / dark theme">
+        <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><circle cx="8" cy="8" r="6.25" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M8 1.75a6.25 6.25 0 0 1 0 12.5z" fill="currentColor"/></svg>
+      </button>
+      <button class="btn" id="logout" type="button" title="Sign out and forget the password on this device">Sign out</button>
+    </div>
+  </header>
+
+  <main id="app">
+    <section class="card filters" aria-label="Filters">
+      <label class="field">
+        <span>Period</span>
+        <select id="period">
+          <option value="this_month">This month</option>
+          <option value="last_month">Last month</option>
+          <option value="7">Last 7 days</option>
+          <option value="30">Last 30 days</option>
+          <option value="90">Last 90 days</option>
+          <option value="this_quarter">This quarter</option>
+          <option value="3m">Last 3 months</option>
+          <option value="6m">Last 6 months</option>
+          <option value="12m">Last 12 months</option>
+          <option value="this_year">This year</option>
+          <option value="last_year">Last year</option>
+          <option value="custom">Custom</option>
+        </select>
+      </label>
+      <label class="field" id="compare-field" hidden>
+        <span>Compare to</span>
+        <select id="compare">
+          <option value="prev">Previous period</option>
+          <option value="yoy">Same period last year</option>
+        </select>
+      </label>
+      <label class="field" id="from-field" hidden>
+        <span>From</span>
+        <input type="date" id="from" min="2015-01-01">
+      </label>
+      <label class="field" id="to-field" hidden>
+        <span>To</span>
+        <input type="date" id="to" min="2015-01-01">
+      </label>
+      <div class="field period-field">
+        <span>Dates</span>
+        <output class="period-hint" id="period-hint" aria-live="polite"></output>
+      </div>
+      <fieldset class="field" id="platforms-field">
+        <legend>Platforms</legend>
+        <div class="chips">
+          <label class="chip"><input type="checkbox" name="platform" value="meta" checked><span class="swatch swatch-meta"></span>Meta</label>
+          <label class="chip"><input type="checkbox" name="platform" value="google" checked><span class="swatch swatch-google"></span>Google Ads</label>
+          <label class="chip"><input type="checkbox" name="platform" value="admixer" checked><span class="swatch swatch-admixer"></span>Admixer</label>
+        </div>
+      </fieldset>
+      <label class="field" id="brand-field">
+        <span>Brand</span>
+        <select id="brand">
+          <option value="">All brands</option>
+          <option value="FF">Farmacia Familiei (FF)</option>
+          <option value="DITA">DITA Hyper Farmacie</option>
+          <option value="OPTICA">Optica Familiei</option>
+        </select>
+      </label>
+      <div class="refresh-box">
+        <span class="muted" id="updated-at" aria-live="polite"></span>
+        <button class="btn" id="refresh" type="button">Refresh</button>
+      </div>
+    </section>
+
+    <div class="alerts" id="alerts" aria-live="polite"></div>
+
+    <section class="hero" id="hero" aria-label="Headline metrics"></section>
+
+    <section class="kpis" id="kpis" aria-label="Key metrics"></section>
+
+    <section class="section" id="platforms-section" aria-labelledby="platforms-title">
+      <h2 class="section-title" id="platforms-title">Platforms</h2>
+      <div class="platforms" id="platforms"></div>
+    </section>
+
+    <section class="section" id="shopify-section" aria-labelledby="shopify-title" hidden>
+      <h2 class="section-title" id="shopify-title">Advertising and traffic</h2>
+      <section class="kpis" id="shop-kpis-ads" aria-label="Advertising and traffic"></section>
+      <div class="split">
+        <div class="card">
+          <div class="card-head">
+            <h3>Total sales and orders</h3>
+            <label class="field"><span class="visually-hidden">Step</span>
+              <select id="shop-granularity">
+                <option value="auto">Step: auto</option>
+                <option value="day">Daily</option>
+                <option value="week">Weekly</option>
+                <option value="month">Monthly</option>
+              </select>
+            </label>
+          </div>
+          <div class="chart-box"><canvas id="chart-shop-sales" role="img" aria-label="Total sales (bars) and orders (line)"></canvas></div>
+        </div>
+        <div class="card">
+          <div class="card-head"><h3>Sales by source</h3></div>
+          <div class="bd-chart">
+            <div class="chart-box small"><canvas id="chart-shop-sources" role="img" aria-label="Share of total sales by order source"></canvas></div>
+            <ul class="bd-legend" id="shop-sources-legend"></ul>
+          </div>
+          <p class="card-note">Order source as recorded by Shopify; Direct — no referrer (typed address, apps, bookmarks).</p>
+        </div>
+      </div>
+      <div class="grid-3">
+        <div class="card">
+          <div class="card-head"><h3>Orders</h3></div>
+          <div class="chart-box small"><canvas id="chart-shop-orders" role="img" aria-label="Orders"></canvas></div>
+        </div>
+        <div class="card">
+          <div class="card-head"><h3>Avg. order value</h3></div>
+          <div class="chart-box small"><canvas id="chart-shop-aov" role="img" aria-label="Average order value"></canvas></div>
+        </div>
+        <div class="card">
+          <div class="card-head"><h3>Total sales and returns</h3></div>
+          <div class="chart-box small"><canvas id="chart-shop-returns" role="img" aria-label="Total sales and returns"></canvas></div>
+        </div>
+      </div>
+      <div class="section-head">
+        <h3 class="bd-title">Products <span class="muted" id="shop-products-count"></span></h3>
+        <div class="table-tools">
+          <label class="visually-hidden" for="shop-product-search">Search products</label>
+          <input type="search" id="shop-product-search" placeholder="Search by name" autocomplete="off">
+          <button class="btn btn-primary" id="shop-products-csv" type="button">Download CSV</button>
+        </div>
+      </div>
+      <div class="card">
+        <div class="table-wrap tall">
+          <table id="shop-products">
+            <thead>
+              <tr>
+                <th scope="col">Product</th>
+                <th scope="col">Orders</th>
+                <th scope="col">Ordered quantity</th>
+                <th scope="col">Total sales</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <p class="card-note" id="shop-products-note"></p>
+      </div>
+      <p class="card-note" id="shop-note"></p>
+    </section>
+
+    <section class="section" id="omnisend-section" aria-labelledby="omnisend-title" hidden>
+      <h2 class="section-title" id="omnisend-title">Push campaigns</h2>
+      <section class="kpis" id="om-kpis-sales" aria-label="Sales from push campaigns"></section>
+      <div class="card">
+        <div class="card-head">
+          <h3>Opens and sends</h3>
+          <label class="field"><span class="visually-hidden">Step</span>
+            <select id="om-granularity">
+              <option value="auto">Step: auto</option>
+              <option value="day">Daily</option>
+              <option value="week">Weekly</option>
+              <option value="month">Monthly</option>
+            </select>
+          </label>
+        </div>
+        <div class="chart-box"><canvas id="chart-om-sends" role="img" aria-label="Opens (bars) and sends (line) by send date"></canvas></div>
+      </div>
+      <div class="grid-3">
+        <div class="card">
+          <div class="card-head"><h3>Open rate</h3></div>
+          <div class="chart-box small"><canvas id="chart-om-open-rate" role="img" aria-label="Open rate by send date"></canvas></div>
+        </div>
+        <div class="card">
+          <div class="card-head"><h3>Click rate</h3></div>
+          <div class="chart-box small"><canvas id="chart-om-click-rate" role="img" aria-label="Click rate by send date"></canvas></div>
+        </div>
+        <div class="card">
+          <div class="card-head"><h3>Bounce rate</h3></div>
+          <div class="chart-box small"><canvas id="chart-om-bounce-rate" role="img" aria-label="Bounce rate by send date"></canvas></div>
+        </div>
+      </div>
+      <div class="section-head">
+        <h3 class="bd-title">Campaigns performance <span class="muted" id="om-campaigns-count"></span></h3>
+        <div class="table-tools">
+          <label class="visually-hidden" for="om-search">Search campaigns</label>
+          <input type="search" id="om-search" placeholder="Search by name" autocomplete="off">
+          <button class="btn btn-primary" id="om-csv" type="button">Download CSV</button>
+        </div>
+      </div>
+      <div class="card">
+        <div class="table-wrap tall">
+          <table id="om-campaigns">
+            <thead><tr></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="grid-2">
+        <div class="card">
+          <div class="card-head"><h3>Share of opens by campaign</h3></div>
+          <div class="bd-chart om-share">
+            <div class="chart-box small"><canvas id="chart-om-share" role="img" aria-label="Share of opens by campaign"></canvas></div>
+            <ul class="bd-legend" id="om-share-legend"></ul>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-head"><h3>By day of week</h3></div>
+          <div class="table-wrap">
+            <table class="bd-table" id="om-weekdays">
+              <thead>
+                <tr>
+                  <th scope="col">Send day</th>
+                  <th scope="col">Campaigns</th>
+                  <th scope="col">Sends</th>
+                  <th scope="col">Open rate</th>
+                  <th scope="col">Click rate</th>
+                  <th scope="col">CTOR</th>
+                  <th scope="col">Revenue / 1,000</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-head"><h3>Platform performance</h3></div>
+        <div class="platforms" id="om-devices"></div>
+      </div>
+      <p class="card-note" id="om-note"></p>
+    </section>
+
+    <section class="section" id="seo-section" aria-labelledby="seo-title" hidden>
+      <h2 class="visually-hidden" id="seo-title">Search Console</h2>
+      <div class="card gsc-perf">
+        <div class="gsc-tiles" id="gsc-tiles" role="group" aria-label="Metrics on the chart"></div>
+        <div class="card-head">
+          <h3 id="gsc-chart-title">Performance in Google Search</h3>
+          <label class="field"><span class="visually-hidden">Step</span>
+            <select id="gsc-granularity">
+              <option value="auto">Step: auto</option>
+              <option value="day">Daily</option>
+              <option value="week">Weekly</option>
+              <option value="month">Monthly</option>
+            </select>
+          </label>
+        </div>
+        <div class="chart-box"><canvas id="chart-gsc" role="img" aria-label="Clicks, impressions, CTR and average position by date"></canvas></div>
+      </div>
+      <div class="grid-2">
+        <div class="card">
+          <div class="card-head"><h3>Devices</h3></div>
+          <div class="bd-chart gsc-share">
+            <div class="chart-box small"><canvas id="chart-gsc-devices" role="img" aria-label="Share of impressions by device"></canvas></div>
+            <div class="gsc-split" id="gsc-devices"></div>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-head"><h3>Brand and non-brand queries</h3></div>
+          <div class="gsc-split" id="gsc-brand"></div>
+          <div class="chart-box small"><canvas id="chart-gsc-brand" role="img" aria-label="Clicks from brand and non-brand queries by date"></canvas></div>
+        </div>
+      </div>
+      <div class="section-head">
+        <h3 class="bd-title">Queries <span class="muted" id="gsc-queries-count"></span></h3>
+        <div class="table-tools">
+          <label class="visually-hidden" for="gsc-search">Search queries</label>
+          <input type="search" id="gsc-search" placeholder="Search queries" autocomplete="off">
+          <label class="field"><span class="visually-hidden">Query type</span>
+            <select id="gsc-query-type">
+              <option value="all">All queries</option>
+              <option value="nonbrand">Non-brand</option>
+              <option value="brand">Brand</option>
+            </select>
+          </label>
+          <button class="btn btn-primary" id="gsc-csv" type="button">Download CSV</button>
+        </div>
+      </div>
+      <div class="card">
+        <div class="table-wrap tall">
+          <table id="gsc-queries" data-dim="query">
+            <thead><tr></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="grid-2 gsc-tables">
+        <div class="card">
+          <div class="card-head"><h3>Pages <span class="muted" id="gsc-pages-count"></span></h3></div>
+          <div class="table-wrap tall">
+            <table id="gsc-pages" data-dim="page">
+              <thead><tr></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-head"><h3>Countries</h3></div>
+          <div class="table-wrap tall">
+            <table id="gsc-countries" data-dim="country">
+              <thead><tr></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+      <p class="card-note" id="gsc-note"></p>
+
+      <div id="ahrefs-block" hidden>
+        <div class="section-head">
+          <h2 class="section-title" id="ahrefs-title">Ahrefs — rankings, competitors, site strength</h2>
+          <div class="table-tools">
+            <label class="field"><span class="visually-hidden">Device</span>
+              <select id="ah-device">
+                <option value="mobile">Mobile rankings</option>
+                <option value="desktop">Desktop rankings</option>
+              </select>
+            </label>
+          </div>
+        </div>
+        <section class="kpis" id="ah-rank-kpis" aria-label="Tracked keywords"></section>
+        <div class="grid-2">
+          <div class="card">
+            <div class="card-head"><h3>Tracked keywords by position</h3></div>
+            <div class="chart-box"><canvas id="chart-ah-positions" role="img" aria-label="Tracked keywords by position range and average position by day"></canvas></div>
+          </div>
+          <div class="card">
+            <div class="card-head"><h3>Competitors</h3></div>
+            <div class="table-wrap">
+              <table class="bd-table" id="ah-competitors">
+                <thead>
+                  <tr>
+                    <th scope="col" class="text">Site</th>
+                    <th scope="col">Share of voice</th>
+                    <th scope="col">Avg. position</th>
+                    <th scope="col">Top 3</th>
+                    <th scope="col">Top 10</th>
+                    <th scope="col">Traffic</th>
+                  </tr>
+                </thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+        <section class="kpis" id="ah-site-kpis" aria-label="Site strength"></section>
+        <div class="grid-2">
+          <div class="card">
+            <div class="card-head"><h3>Organic traffic and keywords (Ahrefs estimate)</h3></div>
+            <div class="chart-box small-ah"><canvas id="chart-ah-traffic" role="img" aria-label="Estimated organic traffic and ranking keywords by month"></canvas></div>
+          </div>
+          <div class="card">
+            <div class="card-head"><h3>Domain Rating and referring domains</h3></div>
+            <div class="chart-box small-ah"><canvas id="chart-ah-links" role="img" aria-label="Domain Rating and referring domains by month"></canvas></div>
+          </div>
+        </div>
+        <div class="section-head">
+          <h3 class="bd-title">Tracked keywords <span class="muted" id="ah-keywords-count"></span></h3>
+          <div class="table-tools">
+            <label class="visually-hidden" for="ah-search">Search keywords</label>
+            <input type="search" id="ah-search" placeholder="Search keywords or pages" autocomplete="off">
+            <label class="field"><span class="visually-hidden">Keyword filter</span>
+              <select id="ah-filter">
+                <option value="all">All keywords</option>
+                <option value="up">Improved (30 days)</option>
+                <option value="down">Declined (30 days)</option>
+                <option value="top10">In top 10</option>
+                <option value="lost">Not ranking</option>
+                <option value="brand">Brand</option>
+                <option value="nonbrand">Non-brand</option>
+              </select>
+            </label>
+            <button class="btn btn-primary" id="ah-csv" type="button">Download CSV</button>
+          </div>
+        </div>
+        <div class="card">
+          <div class="table-wrap tall">
+            <table id="ah-keywords">
+              <thead><tr></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-head"><h3>Top pages by organic traffic <span class="muted" id="ah-pages-date"></span></h3></div>
+          <div class="table-wrap tall">
+            <table class="bd-table" id="ah-pages">
+              <thead>
+                <tr>
+                  <th scope="col" class="text">Page</th>
+                  <th scope="col">Traffic</th>
+                  <th scope="col">Change (30 days)</th>
+                  <th scope="col">Keywords</th>
+                  <th scope="col" class="text">Top keyword</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+        <p class="card-note" id="ah-note"></p>
+      </div>
+    </section>
+
+    <section class="section" id="dataedge-section" aria-labelledby="dataedge-title" hidden>
+      <div class="section-head">
+        <h2 class="section-title" id="dataedge-title">SMS and Viber mailings</h2>
+      </div>
+      <div class="card">
+        <div class="card-head">
+          <h3>Sent by channel</h3>
+          <label class="field"><span class="visually-hidden">Step</span>
+            <select id="de-granularity">
+              <option value="auto">Step: auto</option>
+              <option value="day">Daily</option>
+              <option value="week">Weekly</option>
+              <option value="month">Monthly</option>
+            </select>
+          </label>
+        </div>
+        <div class="chart-box"><canvas id="chart-de-sent" role="img" aria-label="Messages sent by SMS and Viber by date"></canvas></div>
+      </div>
+      <div class="card">
+        <div class="card-head"><h3>Channels</h3></div>
+        <div class="table-wrap">
+          <table class="bd-table" id="de-channels">
+            <thead>
+              <tr>
+                <th scope="col" class="text">Channel</th>
+                <th scope="col">Mailings</th>
+                <th scope="col">Sent</th>
+                <th scope="col">Delivered</th>
+                <th scope="col">Delivery rate</th>
+                <th scope="col">Read</th>
+                <th scope="col">Read rate</th>
+                <th scope="col">Clicks</th>
+                <th scope="col">CTR</th>
+                <th scope="col">Cost</th>
+                <th scope="col">Cost per delivered</th>
+                <th scope="col">Cost per click</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="section-head">
+        <h3 class="bd-title">Mailings <span class="muted" id="de-mailings-count"></span></h3>
+        <div class="table-tools">
+          <label class="visually-hidden" for="de-search">Search mailings</label>
+          <input type="search" id="de-search" placeholder="Search by campaign name" autocomplete="off">
+          <button class="btn btn-primary" id="de-csv" type="button">Download CSV</button>
+        </div>
+      </div>
+      <div class="card">
+        <div class="table-wrap tall">
+          <table id="de-mailings">
+            <thead><tr></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+      <p class="card-note" id="de-note"></p>
+    </section>
+
+    <section class="section" id="onesignal-section" aria-labelledby="onesignal-title" hidden>
+      <div class="section-head">
+        <h2 class="section-title" id="onesignal-title">Push notifications in the FF app</h2>
+      </div>
+      <div class="card">
+        <div class="card-head">
+          <h3>All push notifications by day</h3>
+          <label class="field"><span class="visually-hidden">Step</span>
+            <select id="os-daily-granularity">
+              <option value="auto">Step: auto</option>
+              <option value="day">Daily</option>
+              <option value="week">Weekly</option>
+              <option value="month">Monthly</option>
+            </select>
+          </label>
+        </div>
+        <div class="chart-box"><canvas id="chart-os-daily" role="img" aria-label="Confirmed deliveries and clicks of all push notifications by day"></canvas></div>
+      </div>
+      <div class="card">
+        <div class="card-head"><h3>Journeys <span class="muted" id="os-journeys-count"></span></h3></div>
+        <div class="table-wrap">
+          <table id="os-journeys">
+            <thead><tr></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="section-head">
+        <h3 class="bd-title">Messages</h3>
+        <div class="table-tools">
+          <label class="field"><span class="visually-hidden">Messages</span>
+            <select id="os-kind">
+              <option value="api">Mailings (sent through the API)</option>
+              <option value="campaign">Campaigns (sent from OneSignal)</option>
+              <option value="automated">Automated messages</option>
+            </select>
+          </label>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-head">
+          <h3>Messages: sent and CTR</h3>
+        </div>
+        <div class="chart-box"><canvas id="chart-os-sent" role="img" aria-label="Push notifications sent and CTR by date"></canvas></div>
+      </div>
+      <div class="card" id="os-platforms-card">
+        <div class="card-head"><h3>Platforms</h3></div>
+        <div class="table-wrap">
+          <table class="bd-table" id="os-platforms">
+            <thead>
+              <tr>
+                <th scope="col" class="text">Platform</th>
+                <th scope="col">Sent</th>
+                <th scope="col">Share</th>
+                <th scope="col">Clicks</th>
+                <th scope="col">CTR</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+      <div id="os-messages-block">
+        <div class="section-head">
+          <h3 class="bd-title">Messages <span class="muted" id="os-messages-count"></span></h3>
+          <div class="table-tools">
+            <label class="visually-hidden" for="os-search">Search messages</label>
+            <input type="search" id="os-search" placeholder="Search by name or text" autocomplete="off">
+            <button class="btn btn-primary" id="os-csv" type="button">Download CSV</button>
+          </div>
+        </div>
+        <div class="card">
+          <div class="table-wrap tall">
+            <table id="os-messages">
+              <thead><tr></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+      <p class="card-note" id="os-note"></p>
+    </section>
+
+    <section class="section" id="maps-section" aria-labelledby="maps-title" hidden>
+      <div class="section-head">
+        <h2 class="section-title" id="maps-title">Pharmacies on Google Maps</h2>
+        <div class="table-tools">
+          <label class="field"><span class="visually-hidden">Brand</span>
+            <select id="maps-brand">
+              <option value="">All brands</option>
+              <option value="FF">Farmacia Familiei</option>
+              <option value="DITA">DITA</option>
+              <option value="OPTICA">Optica Familiei</option>
+            </select>
+          </label>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-head">
+          <h3>Actions from the profile</h3>
+          <label class="field"><span class="visually-hidden">Step</span>
+            <select id="maps-granularity">
+              <option value="auto">Step: auto</option>
+              <option value="day">Daily</option>
+              <option value="week">Weekly</option>
+              <option value="month">Monthly</option>
+            </select>
+          </label>
+        </div>
+        <div class="chart-box"><canvas id="chart-maps-actions" role="img" aria-label="Website clicks, calls and direction requests from Google Maps by date"></canvas></div>
+      </div>
+      <div class="card">
+        <div class="card-head"><h3>Where people see the pharmacies</h3></div>
+        <div class="table-wrap">
+          <table class="bd-table" id="maps-views">
+            <thead>
+              <tr>
+                <th scope="col" class="text">Views</th>
+                <th scope="col">Mobile</th>
+                <th scope="col">Desktop</th>
+                <th scope="col">Total</th>
+                <th scope="col">Share</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="section-head">
+        <h3 class="bd-title">Pharmacies <span class="muted" id="maps-locations-count"></span></h3>
+        <div class="table-tools">
+          <label class="visually-hidden" for="maps-search">Search pharmacies</label>
+          <input type="search" id="maps-search" placeholder="Search by name, city or address" autocomplete="off">
+          <button class="btn btn-primary" id="maps-csv" type="button">Download CSV</button>
+        </div>
+      </div>
+      <div class="card">
+        <div class="table-wrap tall">
+          <table id="maps-locations">
+            <thead><tr></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="section-head">
+        <h3 class="bd-title">Reviews <span class="muted" id="maps-reviews-count"></span></h3>
+        <div class="table-tools">
+          <label class="field"><span class="visually-hidden">Reviews</span>
+            <select id="maps-review-filter">
+              <option value="all">All reviews</option>
+              <option value="low">1–3 stars</option>
+              <option value="unanswered">Without a reply</option>
+              <option value="low-unanswered">1–3 stars without a reply</option>
+            </select>
+          </label>
+        </div>
+      </div>
+      <div class="card">
+        <div class="table-wrap tall">
+          <table id="maps-reviews">
+            <thead><tr></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="grid-2">
+        <div class="card">
+          <div class="card-head"><h3>Search terms <span class="muted" id="maps-keywords-months"></span></h3></div>
+          <div class="table-wrap tall">
+            <table id="maps-keywords">
+              <thead><tr></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-head"><h3>Posts <span class="muted" id="maps-posts-count"></span></h3></div>
+          <div class="table-wrap tall">
+            <table id="maps-posts">
+              <thead><tr></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+      <p class="card-note" id="maps-note"></p>
+    </section>
+
+    <section class="section" aria-labelledby="daily-title">
+      <div class="section-head">
+        <h2 class="section-title" id="daily-title">Performance over time</h2>
+        <div class="table-tools">
+          <label class="field" id="granularity-field" hidden><span class="visually-hidden">Step</span>
+            <select id="granularity">
+              <option value="auto">Step: auto</option>
+              <option value="day">Daily</option>
+              <option value="week">Weekly</option>
+              <option value="month">Monthly</option>
+            </select>
+          </label>
+          <label class="field"><span class="visually-hidden">Metric</span><select id="daily-metric" data-kind="all"></select></label>
+        </div>
+      </div>
+      <div class="split">
+        <div class="card">
+          <div class="chart-box"><canvas id="chart-daily" role="img" aria-label="Selected metric by day, week or month and platform"></canvas></div>
+          <p class="card-note">Totals are stacked bars by platform, ratios are lines.</p>
+        </div>
+        <aside class="funnel" id="funnel" aria-label="Funnel"></aside>
+      </div>
+    </section>
+
+    <section class="section" aria-labelledby="efficiency-title">
+      <h2 class="section-title" id="efficiency-title">Cost &amp; CTR</h2>
+      <div class="grid-3">
+        <div class="card">
+          <div class="card-head"><h3>CPM</h3></div>
+          <div class="chart-box small"><canvas id="chart-cpm" role="img" aria-label="CPM — cost per 1,000 impressions"></canvas></div>
+        </div>
+        <div class="card">
+          <div class="card-head"><h3 id="cpc-title">CPC</h3></div>
+          <div class="chart-box small"><canvas id="chart-cpc" role="img" aria-label="CPC — cost per click"></canvas></div>
+        </div>
+        <div class="card">
+          <div class="card-head"><h3>CTR</h3></div>
+          <div class="chart-box small"><canvas id="chart-ctr" role="img" aria-label="CTR — clicks as a share of impressions"></canvas></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" aria-labelledby="results-title">
+      <h2 class="section-title" id="results-title">Results</h2>
+      <div class="grid-2">
+        <div class="card">
+          <div class="card-head"><h3 id="results-daily-title">Conversions and CPA</h3></div>
+          <div class="chart-box"><canvas id="chart-results" role="img" aria-label="Daily conversions (bars) and cost per conversion (line)"></canvas></div>
+        </div>
+        <div class="card">
+          <div class="card-head"><h3 id="weekday-title">By day of week</h3></div>
+          <div class="chart-box"><canvas id="chart-weekday" role="img" aria-label="Daily average by day of week"></canvas></div>
+          <p class="card-note">Daily average: the period total divided by the number of such weekdays in the period.</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" id="structure-section" aria-labelledby="structure-title">
+      <h2 class="section-title" id="structure-title">Platform comparison</h2>
+      <div class="grid-2">
+        <div class="card">
+          <div class="card-head">
+            <h3>Share</h3>
+            <label class="field"><span class="visually-hidden">Metric</span><select id="share-metric" data-kind="sum"></select></label>
+          </div>
+          <div class="chart-box"><canvas id="chart-share" role="img" aria-label="Platform share of the selected metric"></canvas></div>
+        </div>
+        <div class="card">
+          <div class="card-head">
+            <h3>Current vs comparison period</h3>
+            <label class="field"><span class="visually-hidden">Metric</span><select id="compare-metric" data-kind="all"></select></label>
+          </div>
+          <div class="chart-box"><canvas id="chart-compare" role="img" aria-label="Platforms: current period vs comparison period"></canvas></div>
+          <p class="card-note" id="compare-note"></p>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" id="ga-section" aria-labelledby="ga-title" hidden>
+      <h2 class="section-title" id="ga-title">Website — Google Analytics 4</h2>
+      <section class="kpis" id="ga-kpis" aria-label="Website metrics"></section>
+      <div class="split">
+        <div class="card">
+          <div class="card-head">
+            <h3>Sessions and purchases</h3>
+            <label class="field"><span class="visually-hidden">Step</span>
+              <select id="ga-granularity">
+                <option value="auto">Step: auto</option>
+                <option value="day">Daily</option>
+                <option value="week">Weekly</option>
+                <option value="month">Monthly</option>
+              </select>
+            </label>
+          </div>
+          <div class="chart-box"><canvas id="chart-ga-series" role="img" aria-label="Sessions (bars) and purchases (line)"></canvas></div>
+        </div>
+        <aside class="funnel" id="ga-funnel" aria-label="Sessions pipeline"></aside>
+      </div>
+      <div class="grid-2">
+        <div class="card">
+          <div class="card-head"><h3>Sessions by source</h3></div>
+          <div class="bd-chart om-share">
+            <div class="chart-box small"><canvas id="chart-ga-sessions" role="img" aria-label="Share of sessions by source"></canvas></div>
+            <ul class="bd-legend share-legend" id="ga-sessions-legend"></ul>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-head"><h3>Purchases by source</h3></div>
+          <div class="bd-chart om-share">
+            <div class="chart-box small"><canvas id="chart-ga-purchases" role="img" aria-label="Share of purchases by source"></canvas></div>
+            <ul class="bd-legend share-legend" id="ga-purchases-legend"></ul>
+          </div>
+        </div>
+      </div>
+      <div class="section-head">
+        <h3 class="bd-title">Sources</h3>
+        <div class="table-tools">
+          <button class="btn btn-primary" id="ga-csv" type="button">Download CSV</button>
+        </div>
+      </div>
+      <div class="card">
+        <div class="table-wrap">
+          <table id="ga-sources">
+            <thead>
+              <tr>
+                <th scope="col" class="text">Source</th>
+                <th scope="col">Sessions</th>
+                <th scope="col">Share</th>
+                <th scope="col">Sessions vs prev.</th>
+                <th scope="col">Purchases</th>
+                <th scope="col">Share</th>
+                <th scope="col">Conv. rate</th>
+                <th scope="col">Revenue</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+      <p class="card-note" id="ga-note"></p>
+    </section>
+
+    <section class="section" aria-labelledby="campaigns-title">
+      <div class="section-head">
+        <h2 class="section-title" id="campaigns-title">Campaigns <span class="muted" id="campaigns-count"></span></h2>
+        <div class="table-tools">
+          <label class="visually-hidden" for="campaign-search">Search campaigns</label>
+          <input type="search" id="campaign-search" placeholder="Search by name" autocomplete="off">
+          <button class="btn btn-primary" id="csv-export" type="button">Download CSV</button>
+        </div>
+      </div>
+      <div class="card">
+        <div class="table-wrap tall">
+          <table id="campaigns-table">
+            <thead><tr></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-head">
+          <h3>Spend vs efficiency</h3>
+          <label class="field"><span class="visually-hidden">Vertical axis metric</span><select id="bubble-metric" data-kind="bubble"></select></label>
+        </div>
+        <div class="chart-box"><canvas id="chart-bubble" role="img" aria-label="Campaigns: spend on the horizontal axis, selected metric on the vertical axis, size is conversions"></canvas></div>
+        <p class="card-note">Horizontal — spend, vertical — selected metric, bubble size — conversions.</p>
+      </div>
+    </section>
+
+    <section class="section" id="breakdown-section" aria-labelledby="breakdown-title" hidden>
+      <h2 class="section-title" id="breakdown-title">Platform performance</h2>
+      <div class="card" data-breakdown="publisher_platform" hidden>
+        <div class="card-head"><h3>By placement</h3></div>
+        <div class="split bd-split">
+          <div class="platforms bd-cards" id="bd-publisher_platform"></div>
+          <div class="bd-chart">
+            <div class="chart-box small"><canvas id="chart-bd-publisher_platform" role="img" aria-label="Meta impressions by placement"></canvas></div>
+            <ul class="bd-legend" id="bd-legend-publisher_platform"></ul>
+          </div>
+        </div>
+      </div>
+      <div class="card" data-breakdown="device_platform" hidden>
+        <div class="card-head"><h3>By device</h3></div>
+        <div class="split bd-split">
+          <div class="platforms bd-cards" id="bd-device_platform"></div>
+          <div class="bd-chart">
+            <div class="chart-box small"><canvas id="chart-bd-device_platform" role="img" aria-label="Meta impressions by device"></canvas></div>
+            <ul class="bd-legend" id="bd-legend-device_platform"></ul>
+          </div>
+        </div>
+      </div>
+      <div class="card" data-breakdown="device" hidden>
+        <div class="card-head"><h3>By device</h3></div>
+        <div class="split bd-split">
+          <div class="platforms bd-cards" id="bd-device"></div>
+          <div class="bd-chart">
+            <div class="chart-box small"><canvas id="chart-bd-device" role="img" aria-label="Google Ads impressions by device"></canvas></div>
+            <ul class="bd-legend" id="bd-legend-device"></ul>
+          </div>
+        </div>
+      </div>
+      <div class="card" data-breakdown="age_range" hidden>
+        <div class="card-head"><h3>Clicks by age</h3></div>
+        <div class="split bd-split">
+          <div class="table-wrap">
+            <table class="bd-table" id="bd-table-age_range">
+              <thead>
+                <tr>
+                  <th scope="col">Age</th>
+                  <th scope="col">Clicks</th>
+                  <th scope="col">Share of clicks</th>
+                  <th scope="col">Clicks vs prev.</th>
+                  <th scope="col">Impressions</th>
+                  <th scope="col">CTR</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+          <div class="bd-chart">
+            <div class="chart-box small"><canvas id="chart-bd-age_range" role="img" aria-label="Google Ads clicks by age"></canvas></div>
+            <ul class="bd-legend" id="bd-legend-age_range"></ul>
+          </div>
+        </div>
+      </div>
+      <p class="card-note" id="breakdown-note"></p>
+    </section>
+
+    <section class="section" id="placements-section" aria-labelledby="placements-title" hidden>
+      <div class="section-head">
+        <h2 class="section-title" id="placements-title">Placements — profile performance <span class="muted" id="placements-count"></span></h2>
+        <div class="table-tools">
+          <label class="field"><span class="visually-hidden">Group by</span>
+            <select id="placements-group">
+              <option value="pair">Site × profile</option>
+              <option value="domain">By site</option>
+              <option value="profile">By profile</option>
+            </select>
+          </label>
+          <label class="visually-hidden" for="placements-search">Search sites and profiles</label>
+          <input type="search" id="placements-search" placeholder="Search site or profile" autocomplete="off">
+          <button class="btn btn-primary" id="placements-csv" type="button">Download CSV</button>
+        </div>
+      </div>
+      <div class="card">
+        <div class="table-wrap tall">
+          <table id="placements-table">
+            <thead><tr></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <p class="card-note" id="placements-note"></p>
+      </div>
+    </section>
+
+    <section class="section" id="creatives-section" aria-labelledby="creatives-title" hidden>
+      <div class="section-head">
+        <h2 class="section-title" id="creatives-title">Creatives — banner performance <span class="muted" id="creatives-count"></span></h2>
+        <div class="table-tools">
+          <label class="visually-hidden" for="creatives-search">Search creatives</label>
+          <input type="search" id="creatives-search" placeholder="Search creative, size or campaign" autocomplete="off">
+          <button class="btn btn-primary" id="creatives-csv" type="button">Download CSV</button>
+        </div>
+      </div>
+      <div class="card">
+        <div class="table-wrap tall">
+          <table id="creatives-table">
+            <thead><tr></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <p class="card-note" id="creatives-note"></p>
+      </div>
+    </section>
+
+    <section class="section" id="monthly" aria-labelledby="monthly-title" hidden>
+      <div class="section-head">
+        <h2 class="section-title" id="monthly-title">By month</h2>
+        <div class="table-tools">
+          <button class="btn" id="monthly-csv" type="button">Download CSV</button>
+        </div>
+      </div>
+      <div class="card">
+        <div class="table-wrap">
+          <table id="monthly-table">
+            <thead><tr></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <p class="card-note" id="monthly-note"></p>
+      </div>
+    </section>
+
+    <section class="section" aria-labelledby="budget-title">
+      <div class="section-head">
+        <h2 class="section-title" id="budget-title">Monthly budget</h2>
+        <label class="field">
+          <span class="visually-hidden">Month</span>
+          <select id="budget-month"></select>
+        </label>
+      </div>
+      <div class="card budget-layout">
+        <div>
+          <div class="table-wrap">
+            <table id="budget-table">
+              <thead>
+                <tr>
+                  <th scope="col">Channel</th>
+                  <th scope="col" class="text">Status</th>
+                  <th scope="col">Plan</th>
+                  <th scope="col">Actual</th>
+                  <th scope="col">Expected by now</th>
+                  <th scope="col">Forecast</th>
+                  <th scope="col">Remaining</th>
+                  <th scope="col">Allowed per day</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+          <p class="card-note" id="budget-note"></p>
+        </div>
+        <div>
+          <div class="chart-box small"><canvas id="chart-pace" role="img" aria-label="Budget pacing: cumulative actual, even plan and forecast"></canvas></div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    Amounts are in MDL at the official NBM exchange rate on the statistics date. Revenue and conversions follow each
+    platform's attribution (platform totals overlap and exceed actual sales). Time zone: Europe/Chisinau. Data updates every hour from 8:00 to 17:00 on weekdays, at 10:00 and 18:00 on weekends.
+  </footer>
+</body>
+</html>
