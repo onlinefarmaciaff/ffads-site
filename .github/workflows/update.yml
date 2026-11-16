@@ -43,7 +43,7 @@ jobs:
       # Код сборщика — закреплённый коммит, а не ветка: изменения в репозитории кода попадают
       # на дашборд только после замены этого SHA (отдельный PR в ffads-site). Полный SHA —
       # dashboard_marketing → Commits → копировать у нужного коммита ветки main.
-      CODE_SHA: 7b46e674addbfa58a9d36531e3ea7d3b95758e5b
+      CODE_SHA: 55fc844029d96cfe78dee97cf82df2b3df6ac23d
     steps:
       - name: Код сборщика (приватный репозиторий, только чтение)
         env:
@@ -66,6 +66,15 @@ jobs:
           GIT_SSH_COMMAND='ssh -i ~/.ssh/code_key -o IdentitiesOnly=yes' \
             git -C code fetch -q --depth 1 origin "$CODE_SHA"
           git -C code checkout -q --detach FETCH_HEAD
+          # Бренды-партнёры (config/partner-brands.txt) — из ветки main: правка списка работает без смены CODE_SHA.
+          # Не получилось — сборщик берёт список из закреплённого коммита.
+          if GIT_SSH_COMMAND='ssh -i ~/.ssh/code_key -o IdentitiesOnly=yes' git -C code fetch -q --depth 1 origin main \
+            && git -C code show FETCH_HEAD:config/partner-brands.txt > partner-brands.txt; then
+            echo "Бренды-партнёры: список из main"
+          else
+            rm -f partner-brands.txt
+            echo "Бренды-партнёры: список из CODE_SHA"
+          fi
           rm -f ~/.ssh/code_key
           echo "Код: ${CODE_REPO}@$(git -C code rev-parse HEAD)"
           node --version
@@ -138,6 +147,7 @@ jobs:
           GA4_SOURCE_DIMENSION: ${{ vars.GA4_SOURCE_DIMENSION }}
           GSC_SITE_URL: ${{ vars.GSC_SITE_URL }}
           DATAEDGE_SHEET_ID: ${{ vars.DATAEDGE_SHEET_ID }}
+          PARTNER_BRANDS_FILE: ${{ github.workspace }}/partner-brands.txt
           # App ID приложения FF в OneSignal (не секрет — есть в самом приложении); переменная ONESIGNAL_APP_ID его заменяет.
           ONESIGNAL_APP_ID: ${{ vars.ONESIGNAL_APP_ID || 'ed531d1d-e455-4de3-b504-082645cd7520' }}
           GSC_BRAND_REGEX: ${{ vars.GSC_BRAND_REGEX }}
