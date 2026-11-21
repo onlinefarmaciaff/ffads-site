@@ -1,0 +1,14 @@
+/* Вариант GitHub Pages: экран входа поверх страницы. */
+.unlock {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: grid;
+  place-items: center;
+  padding: 16px;
+  background: var(--page);
+  overflow: auto;
+}
+.unlock[hidden] { display: none; }
+.unlock .remember { display: flex; gap: 8px; align-items: center; font-size: 13px; color: var(--ink-2); }
+body.locked { overflow: hidden; }
