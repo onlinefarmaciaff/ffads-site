@@ -1,0 +1,4124 @@
+// FF Ads Dashboard — сценарий страницы: вкладки (обзор и платформы), фильтры, загрузка данных,
+// главные показатели, карточки платформ, воронка, бюджет, графики, таблица кампаний,
+// помесячная таблица, CSV, автообновление.
+// Данные вставляются в страницу только через textContent (без innerHTML).
+// Источник данных — ./api.js: API сервера или расшифрованный файл данных (GitHub Pages).
+import { api } from './api.js';
+import * as charts from './charts.js';
+import { buildCsv } from './csv.js';
+import { addMonths, diffDays, isIsoDate, presetRange } from './dates.js';
+import * as fmt from './format.js';
+import {
+  AGE_ORDER, breakdownLabel, BUBBLE_METRICS, extraMetric, shopifyValue, delta, KPI_ORDER, METRICS, PLATFORM_LABELS, SUM_METRICS, tone, value,
+} from './metrics.js';
+
+const $ = (id) => document.getElementById(id);
+
+const BRAND_LABELS = { FF: 'FF', DITA: 'DITA', OPTICA: 'OPTICA' };
+
+// Вкладки: обзор всех платформ или страница одной платформы. На странице платформы — свои
+// главные показатели и подписи (как в отчётах Looker по каждой платформе).
+const ALL_METRICS = KPI_ORDER;
+const TRAFFIC_METRICS = ['spend', 'impressions', 'clicks', 'ctr', 'cpc', 'cpm'];
+const VIEWS = {
+  // Обзор: ряд показателей — группами Visibility / Engagement / Conversion (BL_ROWS), как в Looker.
+  overview: {
+    hero: ['roas', 'revenue'], kpis: ['revenue', 'impressions', 'clicks', 'ctr', 'cpc', 'cpm'], rows: true,
+    metrics: ALL_METRICS, results: ['conversions', 'cpa'], labels: {},
+  },
+  meta: {
+    hero: ['roas', 'cpa', 'conversions'], kpis: ['revenue', 'impressions', 'clicks', 'ctr', 'cpc', 'cpm'],
+    metrics: ALL_METRICS, results: ['conversions', 'cpa'],
+    labels: { spend: 'Amount spent', conversions: 'Purchases', cpa: 'Cost per purchase', clicks: 'Link clicks', cpc: 'CPC (link)', ctr: 'CTR (link)', revenue: 'Purchase value' },
+  },
+  google: {
+    hero: ['roas', 'cpa', 'conversions'], kpis: ['revenue', 'impressions', 'clicks', 'ctr', 'cpc', 'cpm'],
+    metrics: ALL_METRICS, results: ['conversions', 'cpa'],
+    labels: { spend: 'Cost', cpc: 'Avg. CPC', cpa: 'Cost / conv.', revenue: 'Conv. value' },
+  },
+  admixer: {
+    hero: ['cpm', 'ctr', 'clicks'], kpis: ['impressions', 'cpc', 'active'],
+    metrics: TRAFFIC_METRICS, results: ['clicks', 'cpc'], labels: {},
+  },
+};
+// Вкладка Shopify: свои блоки (renderShopify); для общих функций — как обзор.
+VIEWS.shopify = { ...VIEWS.overview, rows: false };
+// Вкладка Omnisend (push-кампании): свои блоки (renderOmnisend).
+VIEWS.omnisend = { ...VIEWS.overview, rows: false };
+// Вкладка SEO (Search Console): свои блоки (renderSeo).
+VIEWS.seo = { ...VIEWS.overview, rows: false };
+// Вкладка SMS / Viber (Data Edge): свои блоки (renderDataEdge).
+VIEWS.dataedge = { ...VIEWS.overview, rows: false };
+// Вкладка Google Maps (Google Business Profile): свои блоки (renderMaps), свой выбор бренда.
+VIEWS.maps = { ...VIEWS.overview, rows: false };
+// Вкладка App push (OneSignal): свои блоки (renderOneSignal).
+VIEWS.onesignal = { ...VIEWS.overview, rows: false };
+// Вкладка Team: отчёты команды агентов целиком (renderTeam).
+VIEWS.team = { ...VIEWS.overview, rows: false };
+// Вкладки не рекламных платформ: свои данные и блоки, фильтры платформ и бренда не действуют.
+const OWN_VIEWS = ['shopify', 'omnisend', 'seo', 'dataedge', 'maps', 'onesignal', 'team'];
+
+const PLATFORM_CARD_METRICS = { meta: ['roas', 'cpa', 'ctr'], google: ['roas', 'cpa', 'ctr'], admixer: ['cpm', 'ctr', 'cpc'] };
+
+const view = () => VIEWS[state.view];
+const label = (k) => view().labels[k] ?? METRICS[k]?.label ?? k;
+const labelsFor = (keys) => Object.fromEntries(keys.map((k) => [k, label(k)]));
+
+const STATUS_LABELS = {
+  current: { on_track: 'On track', over: 'Forecast: overspend', under: 'Forecast: underspend', no_plan: 'No plan' },
+  past: { on_track: 'Result: on plan', over: 'Result: overspend', under: 'Result: underspend', no_plan: 'No plan' },
+  future: { future: 'Month not started', no_plan: 'No plan' },
+};
+
+const state = {
+  view: 'overview',
+  agent: null,
+  insightsAll: false,
+  config: null,
+  filters: null,
+  summary: null,
+  daily: null,
+  days: null,
+  campaigns: null,
+  budget: null,
+  monthly: null,
+  breakdowns: null, // разбивки Meta: { publisher_platform, device_platform } из /api/breakdown
+  shopify: null, // /api/shopify — вкладка Shopify
+  shopProducts: null, // /api/shopify/products
+  shopSearch: '',
+  omnisend: null, // /api/omnisend — вкладка Omnisend
+  omSearch: '',
+  omSort: { key: 'sent', dir: 'desc' },
+  ga: null, // /api/ga4 — раздел GA4 на обзоре
+  gsc: null, // /api/gsc — вкладка SEO
+  dataedge: null, // /api/dataedge — вкладка SMS / Viber
+  maps: null, // /api/maps — вкладка Google Maps
+  onesignal: null, // /api/onesignal — вкладка App push
+  osSearch: '',
+  osSort: { key: 'date', dir: 'desc' },
+  osJourneySort: { key: 'sent', dir: 'desc' },
+  mapsSearch: '',
+  mapsSort: { locations: { key: 'actions', dir: 'desc' }, reviews: { key: 'date', dir: 'desc' }, keywords: { key: 'impressions', dir: 'desc' }, posts: { key: 'date', dir: 'desc' } },
+  ahrefs: null, // /api/ahrefs — раздел Ahrefs на вкладке SEO
+  ahSearch: '',
+  ahSort: { key: 'traffic', dir: 'desc' },
+  deSearch: '',
+  deSort: { key: 'date', dir: 'desc' },
+  gscMetrics: ['gsc_clicks', 'gsc_impressions'],
+  gscSearch: '',
+  gscSort: { query: { key: 'impressions', dir: 'desc' }, page: { key: 'impressions', dir: 'desc' }, country: { key: 'impressions', dir: 'desc' } },
+  placements: null, // /api/admixer/placements — вкладка Admixer
+  placementsSearch: '',
+  placementsSort: { key: 'impressions', dir: 'desc' },
+  creatives: null, // /api/admixer/creatives — вкладка Admixer
+  creativesSearch: '',
+  adsets: null, // /api/adsets — вкладки Meta и Google Ads
+  metaFunnel: null, // /api/meta/funnel — вкладка Meta
+  metaReach: null, // /api/meta/reach — вкладка Meta
+  metaQuality: null, // /api/meta/quality — вкладка Meta
+  metaVideos: null, // /api/meta/videos — вкладка Meta
+  qualityBelow: false,
+  metaAds: null, // /api/meta/ads — вкладка Meta
+  budgetCampaigns: null, // /api/budget/campaigns
+  fatigueFlagged: false,
+  share: null, // /api/google/impression-share — вкладка Google Ads
+  terms: null, // /api/google/search-terms
+  shareLost: false,
+  termsWaste: false,
+  emq: null, // /api/meta/emq — вкладка Meta
+  adsetsSearch: '',
+  adsetsSort: { key: 'spend', dir: 'desc' },
+  creativesSort: { key: 'impressions', dir: 'desc' },
+  status: null,
+  sort: { key: 'spend', dir: 'desc' },
+  search: '',
+  errors: [],
+  lastLoad: 0,
+};
+
+// ---------- Утилиты DOM ----------
+
+function el(tag, attrs = {}, ...children) {
+  const node = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (v === undefined || v === null || v === false) continue;
+    if (k === 'class') node.className = v;
+    else if (k === 'text') node.textContent = v;
+    else if (k === 'dataset') Object.assign(node.dataset, v);
+    else node.setAttribute(k, v === true ? '' : String(v));
+  }
+  for (const child of children) if (child !== null && child !== undefined) node.append(child);
+  return node;
+}
+
+function fillSelect(select, keys, selected) {
+  const keep = keys.includes(select.value) ? select.value : selected;
+  select.replaceChildren(...keys.map((k) => el('option', { value: k, text: label(k), selected: k === keep })));
+}
+
+function fillMetricSelects() {
+  const keys = view().metrics;
+  fillSelect($('daily-metric'), keys, 'spend');
+  fillSelect($('share-metric'), keys.filter((k) => SUM_METRICS.includes(k)), 'spend');
+  fillSelect($('compare-metric'), keys, 'spend');
+  fillSelect($('bubble-metric'), BUBBLE_METRICS.filter((k) => keys.includes(k)), keys.includes('cpa') ? 'cpa' : 'cpm');
+}
+
+// ---------- Фильтры ----------
+
+function readFilters() {
+  const preset = $('period').value;
+  const today = state.config.today;
+  let range = presetRange(preset, today);
+  if (preset === 'custom') range = { from: $('from').value, to: $('to').value };
+  // Shopify: рекламный расход для MER — все платформы.
+  const platforms = state.view === 'overview'
+    ? [...document.querySelectorAll('input[name="platform"]:checked')].map((i) => i.value)
+    : OWN_VIEWS.includes(state.view) ? Object.keys(PLATFORM_LABELS) : [state.view];
+  const compare = features().yoy ? $('compare').value : 'prev';
+  const partner = PARTNER_VIEWS.includes(state.view) ? $('partner').value : '';
+  return { preset, ...range, platforms, brand: OWN_VIEWS.includes(state.view) ? '' : $('brand').value, partner, compare };
+}
+
+const features = () => state.config?.features ?? {};
+const maxRangeDays = () => features().maxRangeDays ?? 731;
+
+function validateFilters(f) {
+  if (!isIsoDate(f.from) || !isIsoDate(f.to)) return 'Enter both period dates.';
+  if (f.from > f.to) return 'Start date is after end date.';
+  if (diffDays(f.from, f.to) + 1 > maxRangeDays()) return `The period cannot be longer than ${maxRangeDays()} days.`;
+  if (f.platforms.length === 0) return 'Select at least one platform.';
+  return null;
+}
+
+function apiParams(f) {
+  const p = { from: f.from, to: f.to, platforms: f.platforms.join(',') };
+  if (f.brand) p.brand = f.brand;
+  if (f.partner) p.partner = f.partner;
+  if (f.compare === 'yoy') p.compare = 'yoy';
+  return p;
+}
+
+// GA4: свой шаг графика; бренд и платформы GA4 не делит.
+function gaParams(params) {
+  const g = $('ga-granularity').value;
+  return g === 'auto' ? params : { ...params, granularity: g };
+}
+
+function dailyParams(f) {
+  const g = features().granularity ? $('granularity').value : 'day';
+  return g === 'auto' ? apiParams(f) : { ...apiParams(f), granularity: g };
+}
+
+// Фильтры сохраняются в адресе страницы — ссылкой можно поделиться.
+function saveFiltersToUrl(f) {
+  const p = new URLSearchParams({ period: f.preset });
+  if (state.view === 'overview') p.set('platforms', f.platforms.join(','));
+  else p.set('view', state.view);
+  if (f.preset === 'custom') { p.set('from', f.from); p.set('to', f.to); }
+  if (f.brand) p.set('brand', f.brand);
+  if (f.partner) p.set('partner', f.partner);
+  if (f.compare === 'yoy') p.set('compare', 'yoy');
+  if (features().granularity && $('granularity').value !== 'auto') p.set('step', $('granularity').value);
+  window.history.replaceState(null, '', `?${p}`);
+}
+
+function restoreViewFromUrl() {
+  const v = new URLSearchParams(window.location.search).get('view');
+  if (Object.hasOwn(VIEWS, v)) state.view = v;
+}
+
+function restoreFiltersFromUrl() {
+  const p = new URLSearchParams(window.location.search);
+  const period = p.get('period');
+  if ([...$('period').options].some((o) => o.value === period)) $('period').value = period;
+  if (isIsoDate(p.get('from'))) $('from').value = p.get('from');
+  if (isIsoDate(p.get('to'))) $('to').value = p.get('to');
+  if (p.has('platforms')) {
+    const list = p.get('platforms').split(',');
+    for (const box of document.querySelectorAll('input[name="platform"]')) box.checked = list.includes(box.value);
+  }
+  const brand = p.get('brand');
+  if (brand && Object.hasOwn(BRAND_LABELS, brand)) $('brand').value = brand;
+  const partner = p.get('partner');
+  fillPartnerOptions();
+  if (partner && [...$('partner').options].some((o) => o.value === partner)) $('partner').value = partner;
+  if (features().yoy && p.get('compare') === 'yoy') $('compare').value = 'yoy';
+  const step = p.get('step');
+  if (features().granularity && ['day', 'week', 'month'].includes(step)) $('granularity').value = step;
+}
+
+function syncPeriodInputs() {
+  const custom = $('period').value === 'custom';
+  $('from-field').hidden = !custom;
+  $('to-field').hidden = !custom;
+  if (custom && (!$('from').value || !$('to').value)) {
+    const r = presetRange('this_month', state.config.today);
+    $('from').value ||= r.from;
+    $('to').value ||= r.to;
+  }
+  const f = readFilters();
+  $('period-hint').textContent = isIsoDate(f.from) && isIsoDate(f.to) ? `${fmt.date(f.from)} — ${fmt.date(f.to)}` : '';
+}
+
+// ---------- Отрисовка ----------
+
+// Источники в шапке: только те, у которых последний запуск завершился ошибкой (данные этого источника не
+// обновились); когда всё в порядке — ничего не показывается. Время последнего удачного обновления — в подсказке.
+function renderSources() {
+  const list = $('sources');
+  if (!state.status) return;
+  const chips = state.status.sources.filter((s) => s.state === 'error').map((s) => {
+    const title = `${s.label}: last update failed${s.lastOkAt ? ` — data as of ${fmt.dateTime(s.lastOkAt)}` : ''}`;
+    return el('li', { class: 'source', dataset: { state: 'error' }, title, 'aria-label': title },
+      el('span', { class: 'dot', 'aria-hidden': 'true' }),
+      el('span', { text: s.label }),
+      el('span', { class: 'state', text: 'error' }));
+  });
+  list.replaceChildren(...chips);
+  list.hidden = !chips.length;
+}
+
+// ---------- Подсказки команды агентов (журнал FF Ads Intelligence) ----------
+
+// Блок подсказок: на обзоре — первые 4, на вкладке — первые 3, остальные по кнопке. Отметки у карточек KPI —
+// по колонке «Dashboard: metric» журнала: одна на карточку, не больше INSIGHT_MARKS на вкладке (решение команды 24.11).
+const INSIGHTS_TOP = { overview: 4, tab: 3 };
+const INSIGHT_MARKS = 4;
+const INSIGHT_TYPES = { data: 'Data', action: 'Action', hypothesis: 'Hypothesis', observation: 'Observation' };
+const INSIGHT_DECISIONS = { accepted: 'accepted', rejected: 'rejected', postponed: 'postponed' };
+const INSIGHT_SWATCHES = ['meta', 'google', 'admixer', 'shopify', 'omnisend', 'seo', 'dataedge', 'maps', 'onesignal'];
+// Измерения DQ Score и их веса (docs/agent/team-prompt.md, раздел 3.1).
+const DQ_PARTS = [['freshness', 'Freshness', 15], ['completeness', 'Completeness', 15], ['reconciliation', 'Reconciliation', 25], ['attribution', 'Attribution coverage', 15], ['validity', 'Validity', 15]];
+const DQ_COLORS = { green: 'Reliable', yellow: 'Use with caution', red: 'Do not act on this data' };
+const REPORT_TASKS = { daily: 'Daily check', weekly: 'Weekly review', monthly: 'Monthly review', review: 'Team review' };
+
+const daysBetween = (a, b) => Math.round((Date.parse(`${b}T00:00:00Z`) - Date.parse(`${a}T00:00:00Z`)) / 86_400_000);
+const agentAge = () => {
+  const a = state.agent;
+  return a?.lastRun && state.config?.today ? daysBetween(a.lastRun, state.config.today) : 0;
+};
+
+function insightLink(href, text) {
+  return href ? el('a', { href, target: '_blank', rel: 'noopener noreferrer', text }) : null;
+}
+
+// Подсказки блока: обзор — все; вкладка платформы — её канал.
+function viewInsights() {
+  const a = state.agent;
+  if (!a?.available) return [];
+  if (state.view === 'overview' || state.view === 'team') return a.items;
+  return a.items.filter((i) => i.channel === state.view);
+}
+
+// Подсказки для отметок у карточек: на обзоре — только общие (без канала, GA4), иначе ROAS Google отметил бы общий ROAS.
+function markInsights() {
+  const list = viewInsights().filter((i) => i.metric);
+  return state.view === 'overview' ? list.filter((i) => !i.channel || i.channel === 'ga4') : list;
+}
+
+function renderInsight(item, showChannel) {
+  const sub = [];
+  if (item.brand && item.brand !== 'FF') sub.push(item.brand);
+  if (item.detail) sub.push(item.detail);
+  if (item.checkOn) sub.push(`check on ${fmt.dateShort(item.checkOn)}`);
+  const decision = item.decision
+    ? el('span', { class: 'insight-decision', dataset: { decision: item.decision }, text: INSIGHT_DECISIONS[item.decision] })
+    : el('span', { class: 'insight-decision', dataset: { decision: 'pending' }, text: 'awaiting decision' });
+  return el('li', { class: 'insight', id: `insight-${item.id}` },
+    el('span', { class: 'insight-type', dataset: { type: item.type }, text: INSIGHT_TYPES[item.type] ?? 'Observation' }),
+    el('div', { class: 'insight-body' },
+      el('div', { class: 'insight-title' },
+        showChannel && INSIGHT_SWATCHES.includes(item.channel) ? el('span', { class: `swatch swatch-${item.channel}`, 'aria-hidden': 'true' }) : null,
+        el('span', { text: item.title })),
+      sub.length ? el('div', { class: 'insight-sub', text: sub.join(' · ') }) : null),
+    el('div', { class: 'insight-side' },
+      el('span', { text: `${fmt.dateShort(item.date)}${item.confidence ? ` · ${item.confidence} confidence` : ''}` }),
+      decision,
+      insightLink(item.report, 'Report')));
+}
+
+function renderInsights() {
+  const a = state.agent;
+  const section = $('insights');
+  if (!a?.available || state.view === 'team') {
+    section.hidden = true;
+    return;
+  }
+  const overview = state.view === 'overview';
+  // На обзоре — все подсказки (с отметками каналов); на вкладке — только её.
+  const items = viewInsights();
+  section.hidden = !items.length;
+  if (!items.length) return;
+  section.dataset.channel = overview ? '' : state.view;
+  const viewTitle = overview ? '' : ` · ${$('tabs').querySelector(`[data-view="${state.view}"]`)?.textContent.trim() ?? ''}`;
+  $('insights-title').textContent = `Team insights${viewTitle}`;
+  const age = agentAge();
+  const meta = [`FF Ads Intelligence · last check ${a.lastRun ? fmt.dateShort(a.lastRun) : '—'}`];
+  if (age > 1) meta.push(`${age} days ago`);
+  meta.push('target: ROAS ≥ 3.0 for Sales campaigns on Meta and Google Ads');
+  $('insights-meta').replaceChildren(meta.join(' · '));
+  $('insights-meta').classList.toggle('stale', age > 1);
+  if (features().reports) {
+    $('insights-meta').append(' · ', el('a', { href: '#', dataset: { goto: 'team' }, text: 'Reports' }));
+  }
+  if (a.journal) $('insights-meta').append(' · ', insightLink(a.journal, 'Journal'));
+  const top = overview ? INSIGHTS_TOP.overview : INSIGHTS_TOP.tab;
+  const shown = state.insightsAll ? items : items.slice(0, top);
+  $('insights-list').replaceChildren(...shown.map((i) => renderInsight(i, overview)));
+  const more = $('insights-more');
+  more.hidden = items.length <= top;
+  more.textContent = state.insightsAll ? 'Show fewer' : `Show all (${items.length})`;
+}
+
+// Место подсказки (колонка T журнала): карточка KPI или строка кампании — отметка-точка, клик открывает мини-окно
+// рядом с ней; раздел или график / таблица — окно поверх блока, у его заголовка (раздел — по id заголовка:
+// campaigns-title → campaigns, график — по заголовку карточки: «Open rate» → open-rate). Все окна — плавающие, поверх
+// страницы, не сдвигают блоки; × закрывает окно до перезагрузки страницы.
+const INSIGHT_CALLOUTS = 3;
+const POP_GAP = 8;
+const slug = (t) => String(t ?? '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+const closedInsights = new Set();
+// Открытые окна: { box, anchor, block, auto } — anchor — к чему привязано, block — блок, по правому краю которого
+// ставится окно раздела; auto — показано само (раздел, график), иначе — по клику на отметку.
+let insightPops = [];
+
+try { localStorage.removeItem('ffads-dismissed-insights'); } catch { /* закрытые раньше навсегда — больше не храним */ }
+
+const isShown = (node) => node && !node.closest('[hidden]') && node.getClientRects().length > 0;
+
+// Блок для места подсказки на текущей вкладке: раздел (section[aria-labelledby="<key>-title"]) или карточка
+// с таким заголовком. Только видимые блоки.
+function insightTarget(key) {
+  const section = document.querySelector(`#app section[aria-labelledby="${CSS.escape(key)}-title"]`);
+  if (isShown(section)) return { node: section, head: section.querySelector('.section-head, h2') };
+  for (const h of document.querySelectorAll('#app .card h3, #app .card-head h2, #app .section h2')) {
+    if (slug(h.textContent) !== key || !isShown(h)) continue;
+    const card = h.closest('.card') ?? h.closest('.section');
+    return { node: card, head: h.closest('.card-head') ?? h };
+  }
+  return null;
+}
+
+// Мини-окно подсказки: тип, дата и уверенность, ×, текст, ссылка на отчёт; если подсказок у места несколько —
+// остальные заголовками ниже. «All insights» — к блоку Team insights.
+function renderInsightPop(list, stale, auto) {
+  const [item, ...rest] = list;
+  const box = el('aside', {
+    class: `insight-pop${stale ? ' stale' : ''}${auto ? ' auto' : ''}`, role: auto ? 'note' : 'dialog',
+    'aria-label': `${INSIGHT_TYPES[item.type] ?? 'Insight'}: ${item.title}`, dataset: { type: item.type, insight: String(item.id) },
+  },
+  el('div', { class: 'insight-callout-head' },
+    el('span', { class: 'insight-type', dataset: { type: item.type }, text: INSIGHT_TYPES[item.type] ?? 'Observation' }),
+    el('span', { class: 'insight-callout-date', text: `${fmt.dateShort(item.date)}${item.confidence ? ` · ${item.confidence} confidence` : ''}` }),
+    el('button', { type: 'button', class: 'insight-close', title: 'Close', 'aria-label': `Close: ${item.title}`, text: '×' })),
+  el('div', { class: 'insight-title', text: item.title }),
+  item.detail ? el('div', { class: 'insight-sub', text: item.detail }) : null,
+  rest.length ? el('ul', { class: 'insight-pop-more' }, ...rest.map((i) => el('li', { text: `${INSIGHT_TYPES[i.type] ?? 'Insight'}: ${i.title}` }))) : null,
+  el('div', { class: 'insight-pop-links' },
+    insightLink(item.report, 'Report'),
+    el('a', { href: '#', dataset: { showInsight: String(item.id) }, text: 'All insights' })));
+  return box;
+}
+
+// Положение окна: под отметкой (клик) или под заголовком блока у его правого края (раздел, график); не выходит
+// за край экрана. Стрелка указывает на отметку или заголовок.
+function placeInsightPop(p) {
+  if (!p.box.isConnected) return;
+  const r = p.anchor.isConnected ? p.anchor.getBoundingClientRect() : null;
+  if (!r || (!r.width && !r.height) || !isShown(p.anchor)) {
+    p.box.hidden = true;
+    return;
+  }
+  p.box.hidden = false;
+  const vw = document.documentElement.clientWidth;
+  const w = p.box.offsetWidth;
+  const ref = p.block ? p.block.getBoundingClientRect() : r;
+  let left = p.block ? ref.right - w - 12 : r.left + r.width / 2 - 24;
+  left = Math.max(POP_GAP, Math.min(left, vw - w - POP_GAP));
+  const arrow = Math.max(12, Math.min((p.block ? r.left + 24 : r.left + r.width / 2) - left, w - 24));
+  p.box.style.left = `${Math.round(left + window.scrollX)}px`;
+  p.box.style.top = `${Math.round(r.bottom + POP_GAP + window.scrollY)}px`;
+  p.box.style.setProperty('--arrow-x', `${Math.round(arrow)}px`);
+}
+
+function placeInsightPops() {
+  for (const p of insightPops) placeInsightPop(p);
+}
+
+function openInsightPop(list, anchor, { block = null, auto = false } = {}) {
+  const box = renderInsightPop(list, agentAge() > 1, auto);
+  document.body.append(box);
+  const p = { box, anchor, block, auto };
+  insightPops.push(p);
+  placeInsightPop(p);
+  return p;
+}
+
+function closeInsightPops(filter = () => true) {
+  insightPops = insightPops.filter((p) => {
+    if (!filter(p)) return true;
+    p.box.remove();
+    p.anchor.setAttribute?.('aria-expanded', 'false');
+    return false;
+  });
+}
+
+// Подсказки места отметки: та, на которую она указывает, первой, остальные с тем же местом — за ней.
+function insightsOfMark(mark) {
+  const items = state.agent?.items ?? [];
+  const item = items.find((i) => String(i.id) === mark.dataset.insight);
+  if (!item) return [];
+  const same = mark.classList.contains('inline') ? [] : markInsights().filter((i) => i.metric === item.metric && i !== item);
+  return [item, ...same];
+}
+
+function toggleInsightPop(mark) {
+  const open = insightPops.find((p) => p.anchor === mark);
+  closeInsightPops((p) => !p.auto);
+  if (open) return;
+  const list = insightsOfMark(mark);
+  if (!list.length) return;
+  openInsightPop(list, mark);
+  mark.setAttribute('aria-expanded', 'true');
+  insightPops.at(-1).box.querySelector('.insight-close')?.focus({ preventScroll: true });
+}
+
+// Отметки у карточек KPI и окна у разделов и графиков текущей вкладки.
+function markKpis() {
+  for (const m of document.querySelectorAll('.insight-mark:not(.inline)')) m.remove();
+  closeInsightPops();
+  const a = state.agent;
+  if (!a?.available || state.view === 'team') return;
+  const items = markInsights();
+  if (!items.length) return;
+  const stale = agentAge() > 1;
+  let marks = 0;
+  const done = new Set();
+  for (const card of document.querySelectorAll('#app [data-metric]')) {
+    if (marks >= INSIGHT_MARKS) break;
+    const key = card.dataset.metric;
+    if (done.has(key) || card.closest('[hidden]')) continue;
+    const list = items.filter((i) => i.metric === key);
+    if (!list.length) continue;
+    done.add(key);
+    marks++;
+    const [first] = list;
+    const tip = `${INSIGHT_TYPES[first.type] ?? 'Insight'}: ${first.title}${list.length > 1 ? ` (+${list.length - 1} more)` : ''}`;
+    card.classList.add('has-mark');
+    card.append(el('button', {
+      type: 'button', class: `insight-mark${stale ? ' stale' : ''}`, title: tip, 'aria-label': tip, 'aria-haspopup': 'dialog', 'aria-expanded': 'false',
+      dataset: { type: first.type, insight: String(first.id) },
+    }, list.length > 1 ? el('span', { text: `+${list.length - 1}` }) : null));
+  }
+  // Разделы, графики и таблицы: не больше INSIGHT_CALLOUTS на вкладке, по одному окну на блок, закрытые — до перезагрузки.
+  const used = new Set();
+  let callouts = 0;
+  for (const item of items) {
+    if (callouts >= INSIGHT_CALLOUTS) break;
+    if (done.has(item.metric) || closedInsights.has(String(item.id))) continue;
+    const target = insightTarget(item.metric);
+    if (!target || used.has(target.node)) continue;
+    used.add(target.node);
+    callouts++;
+    openInsightPop([item], target.head, { block: target.node, auto: true });
+  }
+}
+
+function showInsight(id) {
+  const item = state.agent?.items.find((i) => String(i.id) === String(id));
+  if (!item) return;
+  const top = state.view === 'overview' ? INSIGHTS_TOP.overview : INSIGHTS_TOP.tab;
+  if (viewInsights().indexOf(item) >= top && !state.insightsAll) {
+    state.insightsAll = true;
+    renderInsights();
+  }
+  const li = document.getElementById(`insight-${item.id}`);
+  if (!li) return;
+  li.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  li.classList.add('flash');
+  setTimeout(() => li.classList.remove('flash'), 1600);
+}
+
+// Ячейка названия в таблице кампаний: отметка, если у кампании есть подсказка (колонка «Campaign ID» журнала).
+function campaignNameCell(r) {
+  const td = el('td', { class: 'text name', text: r.name || r.campaign_id, title: `ID ${r.campaign_id}` });
+  const item = state.agent?.available ? state.agent.items.find((i) => i.campaignId && i.campaignId === String(r.campaign_id) && (!i.channel || i.channel === r.platform)) : null;
+  if (item) {
+    const tip = `${INSIGHT_TYPES[item.type] ?? 'Insight'}: ${item.title}`;
+    td.prepend(el('button', { type: 'button', class: 'insight-mark inline', title: tip, 'aria-label': tip, 'aria-haspopup': 'dialog', 'aria-expanded': 'false', dataset: { type: item.type, insight: String(item.id) } }));
+  }
+  return td;
+}
+
+function renderDq() {
+  const a = state.agent;
+  const d = a?.available ? a.dq : null;
+  $('dq').hidden = !d;
+  if (!d) return;
+  const badge = $('dq-badge');
+  const age = state.config?.today ? daysBetween(d.date, state.config.today) : 0;
+  badge.dataset.color = d.color;
+  badge.classList.toggle('stale', age > 1);
+  badge.replaceChildren(
+    el('span', { class: 'dot', 'aria-hidden': 'true' }),
+    el('span', { text: `Data quality ${fmt.int(d.score)}` }),
+    el('span', { class: 'dq-date', text: age > 1 ? ` · ${age} days ago` : ` · ${fmt.dateShort(d.date)}` }));
+  badge.title = `${DQ_COLORS[d.color] ?? ''} — data quality check of ${fmt.date(d.date)}`;
+  const rows = DQ_PARTS.map(([key, name, weight]) => {
+    const v = d.parts?.[key];
+    const low = v !== null && v !== undefined && v <= (weight * 2) / 3;
+    return el('tr', { class: low ? 'low' : null },
+      el('td', { text: name }),
+      el('td', { text: v === null || v === undefined ? '—' : `${fmt.num(v)} / ${weight}` }));
+  });
+  if (d.unchecked) rows.push(el('tr', { class: 'muted' }, el('td', { text: 'Meta deduplication' }), el('td', { text: 'not checked' })));
+  const trend = (a.dqHistory ?? []).slice(-7).map(([, score]) => fmt.int(score)).join(' → ');
+  const links = [insightLink(d.report, 'Report'), insightLink(a.journal, 'Journal')].filter(Boolean);
+  $('dq-pop').replaceChildren(
+    el('h4', { text: `Data quality ${fmt.int(d.score)} / 100 — ${DQ_COLORS[d.color] ?? ''}` }),
+    el('p', { text: `Checked ${fmt.date(d.date)}${d.task ? ` (${d.task})` : ''}${age > 1 ? ` — ${age} days ago, the team has not run since` : ''}.${d.color === 'green' ? '' : ' Recommendations based on this data are conditional.'}` }),
+    el('table', {}, el('tbody', {}, ...rows)),
+    d.issue ? el('p', {}, el('b', { text: 'Main issue: ' }), d.issue) : null,
+    trend.includes('→') ? el('p', { class: 'muted', text: `Last checks: ${trend}` }) : null,
+    links.length ? el('p', {}, ...links.flatMap((l, i) => (i ? [' · ', l] : [l]))) : null);
+}
+
+function toggleDqPop(open) {
+  const pop = $('dq-pop');
+  const show = open ?? pop.hidden;
+  pop.hidden = !show;
+  $('dq-badge').setAttribute('aria-expanded', String(show));
+}
+
+// ---------- Вкладка Team: отчёты команды целиком ----------
+
+// Markdown отчёта → элементы страницы (только textContent): заголовки, списки, таблицы, **жирный**, `код`,
+// ссылки https. Остальная разметка остаётся текстом.
+function mdInline(text) {
+  const out = [];
+  const re = /\*\*([^*]+)\*\*|`([^`]+)`|\[([^\]]+)\]\((https:\/\/[^\s)]+)\)/g;
+  let last = 0;
+  for (let m = re.exec(text); m; m = re.exec(text)) {
+    if (m.index > last) out.push(text.slice(last, m.index));
+    if (m[1] !== undefined) out.push(el('b', { text: m[1] }));
+    else if (m[2] !== undefined) out.push(el('code', { text: m[2] }));
+    else out.push(insightLink(m[4], m[3]));
+    last = re.lastIndex;
+  }
+  if (last < text.length) out.push(text.slice(last));
+  return out;
+}
+
+function renderMarkdown(md) {
+  const nodes = [];
+  const lines = String(md ?? '').split('\n');
+  let list = null;
+  let para = [];
+  const flushPara = () => {
+    if (para.length) nodes.push(el('p', {}, ...mdInline(para.join(' '))));
+    para = [];
+  };
+  const flushList = () => { list = null; };
+  const cells = (line) => line.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map((c) => c.trim());
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const t = line.trim();
+    let m;
+    if (!t) { flushPara(); flushList(); continue; }
+    if ((m = /^(#{1,4})\s+(.*)$/.exec(t))) {
+      flushPara(); flushList();
+      nodes.push(el(`h${Math.min(m[1].length + 2, 6)}`, {}, ...mdInline(m[2])));
+    } else if (/^(-{3,}|\*{3,})$/.test(t)) {
+      flushPara(); flushList();
+      nodes.push(el('hr'));
+    } else if (t.startsWith('|') && i + 1 < lines.length && /^\|?\s*:?-{2,}/.test(lines[i + 1].trim())) {
+      flushPara(); flushList();
+      const head = cells(t);
+      i += 1;
+      const body = [];
+      while (i + 1 < lines.length && lines[i + 1].trim().startsWith('|')) body.push(cells(lines[++i]));
+      nodes.push(el('div', { class: 'table-wrap' }, el('table', { class: 'report-table' },
+        el('thead', {}, el('tr', {}, ...head.map((c) => el('th', {}, ...mdInline(c))))),
+        el('tbody', {}, ...body.map((r) => el('tr', {}, ...r.map((c) => el('td', {}, ...mdInline(c)))))))));
+    } else if ((m = /^([-*]|\d+\.)\s+(.*)$/.exec(t))) {
+      flushPara();
+      const tag = /\d/.test(m[1]) ? 'ol' : 'ul';
+      if (!list || list.tagName.toLowerCase() !== tag) {
+        list = el(tag);
+        nodes.push(list);
+      }
+      list.append(el('li', {}, ...mdInline(m[2])));
+    } else {
+      flushList();
+      para.push(t);
+    }
+  }
+  flushPara();
+  return nodes;
+}
+
+async function renderTeam() {
+  const a = state.agent;
+  $('team-section').hidden = false;
+  const list = a?.reports ?? [];
+  const select = $('team-report');
+  const keep = select.value;
+  select.replaceChildren(...list.map((r) => el('option', {
+    value: String(r.id), text: `${fmt.date(r.date)} · ${REPORT_TASKS[r.task] ?? 'Report'} · ${r.title}${r.dq !== null && r.dq !== undefined ? ` · DQ ${fmt.int(r.dq)}` : ''}`,
+  })));
+  if (list.some((r) => String(r.id) === keep)) select.value = keep;
+  $('team-empty').hidden = list.length > 0;
+  $('team-report-field').hidden = !list.length;
+  if (!list.length) {
+    $('team-body').replaceChildren();
+    $('team-doc').replaceChildren();
+    return;
+  }
+  let r;
+  try {
+    r = await api('/api/agent/report', { id: select.value });
+  } catch (err) {
+    $('team-body').replaceChildren(el('p', { class: 'muted', text: errorText('Report', err) }));
+    return;
+  }
+  $('team-body').replaceChildren(...(r.available ? renderMarkdown(r.body) : []));
+  const links = [insightLink(r.doc, 'Open in Google Docs'), insightLink(a.journal, 'Journal')].filter(Boolean);
+  $('team-doc').replaceChildren(...links.flatMap((l, i) => (i ? [' · ', l] : [l])));
+}
+
+async function loadAgent() {
+  if (!features().agent) {
+    state.agent = null;
+    return;
+  }
+  try {
+    state.agent = await api('/api/agent');
+  } catch {
+    state.agent = null; // подсказки не критичны
+  }
+}
+
+function renderAlerts() {
+  const alerts = [];
+  const f = state.filters;
+  const s = state.summary;
+  // Покупки Meta проверяются по данным: предупреждение — только если за период (от 3 дней,
+  // иначе утром «сегодня» ещё без покупок) был расход, но ни одной покупки.
+  if (s && f.platforms.includes('meta') && state.view !== 'shopify') {
+    const meta = s.current.byPlatform.meta;
+    if (meta && meta.spend > 0 && meta.conversions === 0 && s.period.days >= 3) {
+      alerts.push(['warn', state.config.metaPurchaseConfigured
+        ? 'Meta: no purchases in the period despite spend — check the Purchase event. Meta ROAS and CPA may not be meaningful.'
+        : 'Meta: no purchases in the period despite spend — the Purchase event may not be configured. Meta ROAS and CPA are not meaningful.']);
+    }
+  }
+  const gaps = Object.entries(state.config?.fxGaps ?? {}).filter(([, n]) => n > 0);
+  if (gaps.length) {
+    const names = { breakdowns: 'breakdowns', placements: 'Admixer placements', omnisend: 'Omnisend' };
+    alerts.push(['warn', `Some ${gaps.map(([k]) => names[k] ?? k).join(', ')} data has no NBM exchange rate — those amounts are not counted in MDL. Check the “NBM rates” source.`]);
+  }
+  if (s && s.current.missingFx > 0 && state.view !== 'shopify') {
+    alerts.push(['warn', `${fmt.int(s.current.missingFx)} statistics rows have no NBM exchange rate — their spend and revenue are not counted in MDL. Check the “NBM rates” source.`]);
+  }
+  if (state.campaigns?.truncated && state.view !== 'shopify') {
+    alerts.push(['warn', 'More than 2,000 campaigns — the table shows the 2,000 with the highest spend. Narrow the period or filters.']);
+  }
+  if (f.partner && state.view === 'admixer') {
+    const from = features().partnerDailyFrom;
+    alerts.push(['info', `Partner brand ${partnerLabel(f.partner)}: totals, charts and campaigns are counted from Admixer creatives whose name matches the brand`
+      + `${from ? ` (data by day from ${fmt.date(from)}${f.from < from ? ' — earlier days are not included' : ''})` : ''}. `
+      + 'Placements — profiles and campaigns whose name matches the brand.']);
+  }
+  if (f.partner && (state.view === 'meta' || state.view === 'google')) {
+    const group = state.view === 'meta' ? 'ad set' : 'ad group';
+    alerts.push(['info', `Partner brand ${partnerLabel(f.partner)}: totals, charts and campaigns include only the ${group}s whose name matches the brand `
+      + `(or, without a match, whose campaign name matches). Campaigns show only the part of this brand. Breakdowns are hidden — they are not split by ${group}.`]);
+  }
+  // SMS / Viber: таблица выгрузки отстаёт от выбранного периода — пустые цифры значат «нет выгрузки», а не «нет рассылок».
+  const de = state.view === 'dataedge' ? state.dataedge : null;
+  if (de?.available && de.sheet && de.dataTo && f.to > de.dataTo) {
+    const last = Object.entries(de.lastDay ?? {}).filter(([, d]) => d).map(([ch, d]) => `${ch === 'sms' ? 'SMS' : 'Viber'} — ${fmt.date(d)}`).join(', ');
+    alerts.push(['warn', `The Google Sheet with the Data Edge reports has mailings only up to ${fmt.date(de.dataTo)} (${last}). `
+      + 'Mailings after that date are not shown: export a fresh report from the account (Reports → SMS / Viber) and replace the data in the SMS and Viber sheets.']);
+  }
+  for (const e of state.errors) alerts.push(['error', e]);
+  $('alerts').replaceChildren(...alerts.map(([kind, text]) => el('div', { class: 'alert', dataset: { kind }, role: kind === 'error' ? 'alert' : null },
+    el('span', { class: 'icon', 'aria-hidden': 'true', text: kind === 'error' ? '×' : kind === 'info' ? 'i' : '!' }),
+    el('span', { text }))));
+}
+
+function deltaInfo(key, cur, prev) {
+  const d = delta(cur, prev);
+  const arrow = d === null || d === 0 ? '' : d > 0 ? '▲ ' : '▼ ';
+  const page = { shopify: state.shopify, omnisend: state.omnisend, seo: state.gsc, dataedge: state.dataedge, maps: state.maps, onesignal: state.onesignal }[state.view] ?? state.summary;
+  const yoy = page?.period?.compare === 'yoy';
+  return {
+    tone: tone(key, d),
+    text: d === null ? 'no data to compare' : `${arrow}${fmt.signedPct(d)} ${yoy ? 'vs last year' : 'vs previous period'}`,
+    short: d === null ? fmt.DASH : `${arrow}${fmt.signedPct(d)}`,
+  };
+}
+
+// Активные кампании — с расходом или показами за период (только по таблице кампаний).
+function activeCampaigns() {
+  return state.campaigns ? state.campaigns.rows.filter((r) => r.spend > 0 || r.impressions > 0).length : null;
+}
+
+function prevTitle(key, prev) {
+  const s = state.summary.period;
+  return `${s.compare === 'yoy' ? 'Last year' : 'Previous period'} (${fmt.date(s.prevFrom)} — ${fmt.date(s.prevTo)}): ${METRICS[key].format(prev)}`;
+}
+
+const NATIVE_TITLE = 'Spend in the ad account currency, without conversion — the same amount as in Meta, Google Ads or Admixer';
+
+function renderHero() {
+  const s = state.summary;
+  if (!s) return;
+  const spend = s.current.total.spend;
+  const sub = el('div', { class: 'hero-sub' });
+  const d = deltaInfo('spend', spend, s.previous.total.spend);
+  sub.append(el('span', { class: 'delta', dataset: { tone: d.tone }, text: d.text }));
+  const b = state.budget;
+  if (b && b.mode === 'current' && b.total.plan > 0 && state.filters.to.slice(0, 7) === b.month?.slice(0, 7)) {
+    sub.append(' · ', el('b', { text: `${fmt.pct(b.total.fact / b.total.plan, 0)} of monthly plan` }),
+      ` · ${STATUS_LABELS.current[b.total.status] ?? ''}`);
+  }
+  const native = fmt.nativeMoney(s.current.native?.total);
+  const main = el('div', { class: 'hero-main', dataset: { metric: 'spend' } },
+    el('div', { class: 'hero-label', text: `${label('spend')} · ${fmt.date(s.period.from)} — ${fmt.date(s.period.to)}` }),
+    el('div', { class: 'hero-value', title: prevTitle('spend', s.previous.total.spend) }, fmt.int(Math.round(spend)), el('small', { text: 'MDL' })),
+    native ? el('div', { class: 'hero-native', title: NATIVE_TITLE, text: `${native} — in ad account currencies` }) : null,
+    sub);
+  const kpis = el('div', { class: 'hero-kpis' }, ...view().hero.map((key) => {
+    const cur = value(key, s.current.total);
+    const prev = value(key, s.previous.total);
+    const info = deltaInfo(key, cur, prev);
+    return el('div', { class: 'hero-kpi', title: prevTitle(key, prev), dataset: { metric: key } },
+      el('div', { class: 'label', text: label(key) }),
+      el('div', { class: 'value', text: METRICS[key].format(cur) }),
+      el('div', { class: 'delta', dataset: { tone: info.tone }, text: info.text }));
+  }));
+  $('hero').replaceChildren(main, kpis);
+}
+
+function renderKpis() {
+  const s = state.summary;
+  if (!s) return;
+  if (view().rows) {
+    $('kpis').className = 'bl-rows';
+    $('kpis').replaceChildren(...BL_ROWS.map(([title, keys]) => el('div', { class: 'bl-row' },
+      el('h3', { text: title }), el('div', { class: 'kpis' }, ...keys.map((key) => adsKpi(key, s))))));
+    return;
+  }
+  $('kpis').className = 'kpis';
+  const cards = view().kpis.map((key) => {
+    if (key === 'active') {
+      const n = activeCampaigns();
+      return el('article', { class: 'kpi', dataset: { metric: 'active' } },
+        el('div', { class: 'label', text: 'Active campaigns' }),
+        el('div', { class: 'value', text: n === null ? fmt.DASH : fmt.int(n) }),
+        el('div', { class: 'delta', text: 'with spend or impressions' }));
+    }
+    const cur = value(key, s.current.total);
+    const prev = value(key, s.previous.total);
+    const info = deltaInfo(key, cur, prev);
+    return el('article', { class: 'kpi', title: prevTitle(key, prev), dataset: { metric: key } },
+      el('div', { class: 'label', text: label(key) }),
+      el('div', { class: 'value', text: METRICS[key].format(cur) }),
+      el('div', { class: 'delta', dataset: { tone: info.tone }, text: info.text }));
+  });
+  $('kpis').replaceChildren(...cards);
+}
+
+function renderPlatforms() {
+  const s = state.summary;
+  $('platforms-section').hidden = state.view !== 'overview';
+  if (!s || state.view !== 'overview') return;
+  const total = s.current.total.spend;
+  $('platforms').replaceChildren(...state.filters.platforms.map((p) => {
+    const cur = s.current.byPlatform[p];
+    const prev = s.previous.byPlatform[p];
+    const share = total > 0 ? cur.spend / total : 0;
+    const info = deltaInfo('spend', cur.spend, prev.spend);
+    const native = fmt.nativeMoney(s.current.native?.byPlatform?.[p]);
+    const fill = el('div', { class: `swatch-${p}` });
+    fill.style.width = `${(share * 100).toFixed(1)}%`;
+    const card = el('button', { class: 'platform-card', type: 'button', dataset: { view: p }, title: `Open the ${PLATFORM_LABELS[p]} page` },
+      el('div', { class: 'head' },
+        el('span', { class: `swatch swatch-${p}`, 'aria-hidden': 'true' }),
+        el('span', { class: 'name', text: PLATFORM_LABELS[p] }),
+        el('span', { class: 'share', text: fmt.pct(share, 1) })),
+      el('div', {}, el('div', { class: 'spend', text: fmt.money(cur.spend) }),
+        native ? el('div', { class: 'native', title: NATIVE_TITLE, text: native }) : null,
+        el('div', { class: 'delta', dataset: { tone: info.tone }, text: info.text })),
+      el('div', { class: 'track', 'aria-hidden': 'true' }, fill),
+      el('div', { class: 'metrics' }, ...PLATFORM_CARD_METRICS[p].map((k) => el('div', {},
+        el('div', { class: 'label', text: METRICS[k].label }),
+        el('div', { class: 'value', text: METRICS[k].format(value(k, cur)) })))));
+    return card;
+  }));
+}
+
+// ---------- Разбивки: площадки и устройства Meta, устройства и возраст Google Ads ----------
+
+// metric — показатель диаграммы и доли на карточках. Клики — как в отчётах Looker: у площадок Meta
+// «Clicks (all)», у устройств Meta — клики по ссылке. group — объединение значений в карточки
+// (Google Ads: Mobile и Others), order — порядок значений (возраст — по возрасту), table — значения
+// таблицей, а не карточками (возраст: 7 групп).
+const BREAKDOWNS = {
+  publisher_platform: { view: 'meta', clicksKey: 'clicks', clicksLabel: 'Link clicks' },
+  device_platform: { view: 'meta', clicksKey: 'clicks', clicksLabel: 'Link clicks' },
+  age: { view: 'meta', clicksKey: 'clicks', clicksLabel: 'Link clicks', order: ['13_17', ...AGE_ORDER, 'unknown'] },
+  gender: { view: 'meta', clicksKey: 'clicks', clicksLabel: 'Link clicks', order: ['female', 'male', 'unknown'] },
+  // Регион: Meta не отдаёт покупки по регионам — без покупок, CPA и ROAS; таблица без диаграммы, первые REGION_ROWS.
+  region: { view: 'meta', clicksKey: 'clicks', clicksLabel: 'Link clicks', noConversions: true, tableOnly: true },
+  device: { view: 'google', clicksKey: 'clicks', clicksLabel: 'Clicks' },
+  age_range: { view: 'google', clicksKey: 'clicks', clicksLabel: 'Clicks', order: AGE_ORDER },
+};
+const breakdownsFor = (view) => Object.keys(BREAKDOWNS).filter((dim) => BREAKDOWNS[dim].view === view);
+
+const BD_MIN_SHARE = 0.0001;
+const REGION_ROWS = 12;
+const BD_TITLES = { age_range: 'Age', age: 'Age', gender: 'Gender', region: 'Region', publisher_platform: 'Placement' };
+
+// Таблица разбивки: значение, расход и его доля, покупки (конверсии), CPA, ROAS, показы, клики, CTR —
+// с изменением к периоду сравнения у расхода, CPA и ROAS. Диаграмма — доля расхода.
+function bdColumns(cfg) {
+  const ratio = (a, b) => (b > 0 ? a / b : null);
+  const withDelta = (key, get, format) => ({
+    title: label(key),
+    cell: (r) => {
+      const cur = get(r.current);
+      const info = deltaInfo(key, cur, get(r.previous));
+      if (cur === null || cur === undefined) return el('td', { class: 'muted', text: fmt.DASH });
+      return el('td', {}, format(cur), ' ', el('span', { class: 'delta', dataset: { tone: info.tone }, text: info.short }));
+    },
+  });
+  if (cfg.noConversions) {
+    return [
+      withDelta('spend', (x) => x.spend, fmt.money),
+      { title: 'Share of spend', cell: (r, total) => el('td', { text: fmt.pct(ratio(r.current.spend, total), 1) }) },
+      { title: 'Impressions', cell: (r) => el('td', { text: fmt.int(r.current.impressions) }) },
+      withDelta('cpm', (x) => ratio(x.spend * 1000, x.impressions), METRICS.cpm.format),
+      { title: cfg.clicksLabel, cell: (r) => el('td', { text: fmt.int(r.current[cfg.clicksKey]) }) },
+      { title: 'CTR', cell: (r) => el('td', { text: METRICS.ctr.format(ratio(r.current[cfg.clicksKey], r.current.impressions)) }) },
+      withDelta('cpc', (x) => ratio(x.spend, x[cfg.clicksKey]), METRICS.cpc.format),
+    ];
+  }
+  return [
+    withDelta('spend', (x) => x.spend, fmt.money),
+    { title: 'Share of spend', cell: (r, total) => el('td', { text: fmt.pct(ratio(r.current.spend, total), 1) }) },
+    { title: label('conversions'), cell: (r) => el('td', { text: METRICS.conversions.format(r.current.conversions) }) },
+    withDelta('cpa', (x) => ratio(x.spend, x.conversions), METRICS.cpa.format),
+    withDelta('roas', (x) => ratio(x.revenue, x.spend), METRICS.roas.format),
+    { title: 'Impressions', cell: (r) => el('td', { text: fmt.int(r.current.impressions) }) },
+    { title: cfg.clicksLabel, cell: (r) => el('td', { text: fmt.int(r.current[cfg.clicksKey]) }) },
+    { title: 'CTR', cell: (r) => el('td', { text: METRICS.ctr.format(ratio(r.current[cfg.clicksKey], r.current.impressions)) }) },
+  ];
+}
+
+function renderBreakdowns() {
+  const bd = state.breakdowns;
+  const dims = breakdownsFor(state.view);
+  const show = dims.length > 0 && bd && dims.some((dim) => bd[dim]?.available);
+  $('breakdown-section').hidden = !show;
+  if (!show) return;
+  let dataFrom = null;
+  let hidden = 0;
+  let ageCoverage = null;
+  // Карточка — только у разбивок вкладки с данными (новая разбивка до первой загрузки не показывается).
+  for (const card of document.querySelectorAll('[data-breakdown]')) card.hidden = !dims.includes(card.dataset.breakdown) || !bd[card.dataset.breakdown]?.available;
+  for (const dim of dims) {
+    const cfg = BREAKDOWNS[dim];
+    const b = bd[dim];
+    const all = b?.available ? [...b.rows] : [];
+    if (b?.dataFrom && (!dataFrom || b.dataFrom > dataFrom)) dataFrom = b.dataFrom;
+    const total = all.reduce((sum, r) => sum + r.current.spend, 0);
+    // Значения с долей расхода меньше BD_MIN_SHARE (единичные показы «Other») — шум; без расхода — не показываются.
+    const rows = all.filter((r) => total > 0 && r.current.spend / total >= BD_MIN_SHARE);
+    hidden += all.length - rows.length;
+    if (cfg.order) rows.sort((x, y) => cfg.order.indexOf(x.value) - cfg.order.indexOf(y.value));
+    else rows.sort((x, y) => y.current.spend - x.current.spend);
+    // Регионы: первые REGION_ROWS по расходу, остальные — одной строкой.
+    if (dim === 'region' && rows.length > REGION_ROWS + 1) {
+      const rest = rows.splice(REGION_ROWS);
+      const add = (key) => rest.reduce((acc, r) => { for (const k of Object.keys(r[key])) acc[k] = (acc[k] ?? 0) + r[key][k]; return acc; }, {});
+      rows.push({ value: 'other', label: `Other regions (${rest.length})`, current: add('current'), previous: add('previous') });
+    }
+    if (dim === 'age_range' && b?.platformTotal?.spend > 0) ageCoverage = total / b.platformTotal.spend;
+    const cols = bdColumns(cfg);
+    const table = $(`bd-table-${dim}`);
+    table.tHead.rows[0].replaceChildren(el('th', { scope: 'col', class: 'text', text: BD_TITLES[dim] ?? 'Device' }),
+      ...cols.map((c) => el('th', { scope: 'col', text: c.title })));
+    table.tBodies[0].replaceChildren(...rows.map((r) => {
+      if (cfg.tableOnly) return el('tr', {}, el('td', { class: 'text', text: r.label ?? breakdownLabel(r.value, dim) }), ...cols.map((c) => c.cell(r, total)));
+      const swatch = el('span', { class: 'swatch', 'aria-hidden': 'true' });
+      swatch.style.background = charts.breakdownCssColor(r.value);
+      return el('tr', {}, el('td', { class: 'text' }, swatch, ` ${breakdownLabel(r.value, dim)}`), ...cols.map((c) => c.cell(r, total)));
+    }));
+    if (!rows.length) table.tBodies[0].replaceChildren(el('tr', {}, el('td', { colspan: cols.length + 1, class: 'text muted', text: 'No data for the selected period' })));
+    if (cfg.tableOnly) continue;
+    charts.breakdown(`chart-bd-${dim}`, 'spend', rows, dim);
+    $(`bd-legend-${dim}`).replaceChildren(...rows.map((r) => {
+      const swatch = el('span', { class: 'swatch', 'aria-hidden': 'true' });
+      swatch.style.background = charts.breakdownCssColor(r.value);
+      return el('li', {}, swatch, el('span', { text: breakdownLabel(r.value, dim) }),
+        el('span', { class: 'num', text: fmt.pct(r.current.spend / total, 1) }));
+    }));
+  }
+  const f = state.filters;
+  const prev = state.summary?.period.compare === 'yoy' ? 'last year' : 'the previous period';
+  const parts = ['Diagram — share of spend. Spend, CPA and ROAS changes are vs ' + prev + '.'];
+  if (state.view === 'google' && ageCoverage !== null) {
+    parts.push(`Age data covers ${fmt.pct(Math.min(ageCoverage, 1), 0)} of Google Ads spend in the period — campaigns without age reporting (for example Performance Max) are not included.`);
+  }
+  parts.push(`${label('conversions')} and their value — as in the ad platform (attribution of the ad account); ROAS — value ÷ spend.`);
+  if (dims.includes('region') && bd.region?.available) {
+    parts.push('By region Meta reports only delivery (spend, impressions, clicks): since 2021 purchases and their value are not available with the region breakdown. Region — by where people live and use Facebook, as determined by Meta. Region data is kept for the last 13 months.');
+  }
+  if (dims.includes('age') && bd.age?.available) parts.push('Age and gender — of people who saw the ads, as estimated by Meta.');
+  if (hidden) parts.push(`Values under ${fmt.pct(BD_MIN_SHARE, 2)} of spend are not shown.`);
+  parts.push(`Breakdown data is available from ${fmt.date(dataFrom)}${dataFrom && f.from < dataFrom ? ' — the beginning of the period is not included' : ''}.`);
+  $('breakdown-note').textContent = parts.join(' ');
+}
+
+// ---------- Площадки Admixer (вкладка Admixer) ----------
+
+const PLACEMENTS_ROWS = 500;
+const ratioOf = (a, b) => (b > 0 ? a / b : null);
+
+// Строки по выбранной группировке: сайт × профиль, сайты или профили.
+function placementRows() {
+  const p = state.placements;
+  if (!p?.available) return [];
+  const group = $('placements-group').value;
+  let rows = p.rows;
+  if (group !== 'pair') {
+    const acc = new Map();
+    for (const r of rows) {
+      const k = group === 'domain' ? r.domain : `${r.profile}|${r.campaign}`;
+      const a = acc.get(k) ?? {
+        domain: group === 'domain' ? r.domain : '', profile: group === 'profile' ? r.profile : '', campaign: group === 'profile' ? r.campaign : '',
+        sites: 0, impressions: 0, clicks: 0, spend: 0, spendNative: 0, viewable: 0,
+      };
+      a.sites++;
+      for (const f of ['impressions', 'clicks', 'spend', 'spendNative', 'viewable']) a[f] += r[f];
+      acc.set(k, a);
+    }
+    rows = [...acc.values()];
+  }
+  const q = state.placementsSearch.trim().toLocaleLowerCase('ru');
+  if (q) rows = rows.filter((r) => r.domain.includes(q) || r.profile.toLocaleLowerCase('ru').includes(q));
+  const col = placementColumns().find((c) => c.key === state.placementsSort.key) ?? placementColumns().find((c) => c.key === 'impressions');
+  const dir = state.placementsSort.dir === 'asc' ? 1 : -1;
+  return [...rows].sort((a, b) => {
+    const va = col.get(a);
+    const vb = col.get(b);
+    if (va === null || va === undefined) return 1;
+    if (vb === null || vb === undefined) return -1;
+    if (col.type === 'text') return dir * String(va).localeCompare(String(vb), 'ru');
+    return dir * (va - vb);
+  });
+}
+
+function placementColumns() {
+  const group = $('placements-group').value;
+  const cur = state.placements?.currency ?? 'EUR';
+  const cols = [];
+  if (group !== 'profile') {
+    cols.push({ key: 'domain', title: 'Site', type: 'text', get: (r) => r.domain, cell: (r) => el('td', { class: 'text name', text: r.domain }) });
+  }
+  if (group !== 'domain') {
+    cols.push({
+      key: 'profile', title: 'Profile', type: 'text', get: (r) => r.profile,
+      cell: (r) => el('td', { class: 'text name', text: r.profile, title: r.campaign ? `Campaign: ${r.campaign}` : undefined }),
+    });
+  }
+  if (group !== 'pair') {
+    cols.push({ key: 'sites', title: group === 'domain' ? 'Profiles' : 'Sites', type: 'number', get: (r) => r.sites, cell: (r) => el('td', { text: fmt.int(r.sites) }) });
+  }
+  const metric = (key, title, get, format) => ({ key, title, type: 'number', get, cell: (r) => el('td', { text: format(get(r)) }) });
+  cols.push(
+    metric('impressions', 'Impressions', (r) => r.impressions, fmt.int),
+    metric('clicks', 'Clicks', (r) => r.clicks, fmt.int),
+    metric('ctr', 'CTR', (r) => ratioOf(r.clicks, r.impressions), METRICS.ctr.format),
+    metric('cpm', 'CPM', (r) => ratioOf(r.spend * 1000, r.impressions), fmt.money2),
+    metric('cpc', 'CPC', (r) => ratioOf(r.spend, r.clicks), fmt.money2),
+    metric('viewability', 'Viewability', (r) => ratioOf(r.viewable, r.impressions), (v) => fmt.pct(v, 1)),
+    metric('spend', 'Spend', (r) => r.spend, fmt.money2),
+    metric('spendNative', `Spend, ${cur}`, (r) => r.spendNative, (v) => (typeof v === 'number' ? `${fmt.ratio(v)} ${cur}` : fmt.DASH)),
+  );
+  return cols;
+}
+
+function renderPlacements() {
+  const p = state.placements;
+  const show = state.view === 'admixer' && Boolean(p?.available);
+  $('placements-section').hidden = !show;
+  if (!show) return;
+  const columns = placementColumns();
+  $('placements-table').tHead.rows[0].replaceChildren(...columns.map((c) => {
+    const sorted = state.placementsSort.key === c.key;
+    return el('th', {
+      scope: 'col',
+      class: `sortable${c.type === 'text' ? ' text' : ''}`,
+      'aria-sort': sorted ? (state.placementsSort.dir === 'asc' ? 'ascending' : 'descending') : 'none',
+    }, el('button', { type: 'button', dataset: { key: c.key }, text: c.title }));
+  }));
+  const rows = placementRows();
+  const body = $('placements-table').tBodies[0];
+  if (rows.length === 0) {
+    body.replaceChildren(el('tr', {}, el('td', { colspan: columns.length, class: 'text muted', text: 'No placement data for the selected period' })));
+  } else {
+    const frag = document.createDocumentFragment();
+    for (const r of rows.slice(0, PLACEMENTS_ROWS)) frag.append(el('tr', {}, ...columns.map((c) => c.cell(r))));
+    body.replaceChildren(frag);
+  }
+  $('placements-count').textContent = `(${fmt.int(rows.length)})`;
+  const notes = ['Admixer statistics of profiles (ad sets) by site. Spend, CPM and CPC — in MDL at the NBM rate; '
+    + `Spend, ${p.currency} — as in the Admixer account. Viewability — share of viewable impressions.`];
+  if (p.mode === 'monthly' && p.months) {
+    notes.push(`Totals for whole months: ${fmt.monthName(p.months[0])} — ${fmt.monthName(p.months[1])} (data by day is available from ${fmt.date(p.dailyFrom)}).`);
+  }
+  if (rows.length > PLACEMENTS_ROWS) notes.push(`Showing the first ${fmt.int(PLACEMENTS_ROWS)} rows — use search or download CSV for the full list.`);
+  if (p.truncated) notes.push(`More than ${fmt.int(p.rows.length)} rows — the list is limited to the ones with the most impressions.`);
+  if (p.dataFrom && state.filters.from.slice(0, 7) < p.dataFrom) notes.push(`Placement data is available from ${fmt.monthName(p.dataFrom)}.`);
+  $('placements-note').textContent = notes.join(' ');
+}
+
+// ---------- Бренды-партнёры (вкладка Admixer) ----------
+
+const PARTNER_NONE = '-';
+const PARTNER_NONE_LABEL = 'Other / No brand';
+const PARTNER_VIEWS = ['meta', 'google', 'admixer'];
+const partnerLabel = (v) => (v === PARTNER_NONE || !v ? PARTNER_NONE_LABEL : v);
+
+// Список фильтра — бренды из config/partner-brands.txt, у которых есть данные на платформе вкладки
+// (Admixer — креативы, Meta и Google Ads — группы объявлений). Выбранный бренд сохраняется, если он есть в списке.
+function fillPartnerOptions() {
+  const p = PARTNER_VIEWS.includes(state.view) ? features().partners?.[state.view] : null;
+  const list = p?.brands ?? [];
+  const keep = $('partner').value;
+  const opts = [el('option', { value: '', text: 'All partner brands' }), ...list.map((b) => el('option', { value: b, text: b }))];
+  if (list.length && p.none) opts.push(el('option', { value: PARTNER_NONE, text: PARTNER_NONE_LABEL }));
+  $('partner').replaceChildren(...opts);
+  if (opts.some((o) => o.value === keep)) $('partner').value = keep;
+  $('partner-field').hidden = opts.length <= 1;
+}
+
+// ---------- Охват и частота Meta ----------
+
+function reachTile(labelText, cur, prev, format, better) {
+  const info = cur !== null && prev !== null && prev !== undefined ? deltaInfo(better, cur, prev) : { tone: 'neutral', text: '' };
+  return el('div', { class: 'kpi' },
+    el('div', { class: 'label', text: labelText }),
+    el('div', { class: 'value', text: format(cur) }),
+    el('div', { class: 'delta', dataset: { tone: info.tone }, text: info.text || ' ' }));
+}
+
+function renderReach() {
+  const r = state.metaReach;
+  const show = state.view === 'meta' && Boolean(r?.available || r?.reason === 'partner');
+  $('reach-section').hidden = !show;
+  if (!show) return;
+  const freq = (x) => (x && x.reach > 0 ? x.impressions / x.reach : null);
+  const cur = r.current ?? null;
+  const prev = r.previous ?? null;
+  const spend = state.summary?.current.total.spend ?? null;
+  $('reach-kpis').replaceChildren(
+    reachTile('Reach', cur?.reach ?? null, prev?.reach ?? null, fmt.int, 'impressions'),
+    reachTile('Frequency', freq(cur), freq(prev), (v) => (v === null ? fmt.DASH : fmt.ratio(v)), 'cpm'),
+    reachTile('Cost per 1,000 reached', cur?.reach > 0 && spend !== null ? (spend * 1000) / cur.reach : null,
+      prev?.reach > 0 && state.summary ? (state.summary.previous.total.spend * 1000) / prev.reach : null, fmt.money2, 'cpm'),
+  );
+  const weeks = (r.weeks ?? []).map(([week, reach, impressions]) => ({ week, reach, frequency: reach > 0 ? impressions / reach : null }));
+  charts.metaReach('chart-reach', weeks);
+  const notes = [];
+  if (r.reason === 'partner') notes.push('With a partner brand selected, reach is not shown: Meta counts reach by campaign and ad account.');
+  else if (!cur) notes.push('Reach is counted by Meta for a whole period and is available for the preset periods (this / last month, last 7, 30, 90 days, quarter, 3, 6, 12 months, this / last year) — not for custom dates.');
+  if (r.approx) notes.push('With a brand selected — the sum of the reach of its campaigns: people reached by several campaigns are counted more than once.');
+  notes.push('Frequency — impressions ÷ reach: how many times one person saw the ads on average. Above 3–4 a week the audience usually burns out: CPM and CPA grow.');
+  notes.push(`Weekly chart — the whole ad account, weeks from Monday; updated ${r.at ? fmt.dateTime(r.at) : fmt.DASH}.`);
+  $('reach-note').textContent = notes.join(' ');
+}
+
+// ---------- Группы объявлений Meta (ad sets) и Google Ads (ad groups) ----------
+
+const ADSET_ROWS = 500;
+const adsetWord = () => (state.view === 'google' ? 'Ad group' : 'Ad set');
+
+function adsetColumns() {
+  return [
+    { key: 'name', title: adsetWord(), type: 'text', get: (r) => r.name, cell: (r) => el('td', { class: 'text name', text: r.name || r.adset_id, title: `ID ${r.adset_id}` }) },
+    { key: 'campaign', title: 'Campaign', type: 'text', get: (r) => r.campaign, cell: (r) => el('td', { class: 'text name', text: r.campaign || r.campaign_id, title: r.campaign || undefined }) },
+    { key: 'partner', title: 'Partner brand', type: 'text', get: (r) => r.partner || '', cell: (r) => el('td', { class: r.partner ? 'text' : 'text muted', text: r.partner || PARTNER_NONE_LABEL }) },
+    ...view().metrics.map((k) => ({ key: k, title: label(k), type: 'number', get: (r) => value(k, r), cell: (r) => el('td', { text: METRICS[k].format(value(k, r)) }) })),
+  ];
+}
+
+function adsetRows() {
+  const p = state.adsets;
+  if (!p?.available) return [];
+  const q = state.adsetsSearch.trim().toLocaleLowerCase('ru');
+  const rows = q ? p.rows.filter((r) => `${r.name} ${r.campaign} ${r.partner}`.toLocaleLowerCase('ru').includes(q)) : p.rows;
+  const cols = adsetColumns();
+  const col = cols.find((c) => c.key === state.adsetsSort.key) ?? cols.find((c) => c.key === 'spend');
+  const dir = state.adsetsSort.dir === 'asc' ? 1 : -1;
+  return [...rows].sort((a, b) => {
+    const va = col.get(a);
+    const vb = col.get(b);
+    if (va === null || va === undefined) return 1;
+    if (vb === null || vb === undefined) return -1;
+    if (col.type === 'text') return dir * String(va).localeCompare(String(vb), 'ru');
+    return dir * (va - vb);
+  });
+}
+
+function renderAdsets() {
+  const p = state.adsets;
+  const show = (state.view === 'meta' || state.view === 'google') && Boolean(p?.available);
+  $('adsets-section').hidden = !show;
+  if (!show) return;
+  $('adsets-name').textContent = `${adsetWord()}s`;
+  const columns = adsetColumns();
+  $('adsets-table').tHead.rows[0].replaceChildren(...columns.map((c) => el('th', {
+    scope: 'col', class: `sortable${c.type === 'text' ? ' text' : ''}`,
+    'aria-sort': state.adsetsSort.key === c.key ? (state.adsetsSort.dir === 'asc' ? 'ascending' : 'descending') : 'none',
+  }, el('button', { type: 'button', dataset: { key: c.key }, text: c.title }))));
+  const rows = adsetRows();
+  const body = $('adsets-table').tBodies[0];
+  if (!rows.length) {
+    body.replaceChildren(el('tr', {}, el('td', { colspan: columns.length, class: 'text muted', text: `No ${adsetWord().toLowerCase()} data for the selected period` })));
+  } else {
+    const frag = document.createDocumentFragment();
+    for (const r of rows.slice(0, ADSET_ROWS)) frag.append(el('tr', {}, ...columns.map((c) => c.cell(r))));
+    body.replaceChildren(frag);
+  }
+  $('adsets-count').textContent = `(${fmt.int(rows.length)})`;
+  const notes = [state.view === 'google'
+    ? 'Google Ads statistics by ad group. Campaigns without ad groups (Performance Max and similar) are not in this table — they are in Campaigns.'
+    : 'Meta statistics by ad set (as in Ads Manager, attribution of the ad account).'];
+  notes.push('Partner brand — by the name of the group, otherwise by the campaign name (config/partner-brands.txt).');
+  if (rows.length > ADSET_ROWS) notes.push(`Showing the first ${fmt.int(ADSET_ROWS)} rows — use search or download CSV for the full list.`);
+  if (p.dataFrom && state.filters.from < p.dataFrom) notes.push(`Data by ${adsetWord().toLowerCase()} is available from ${fmt.date(p.dataFrom)} — the beginning of the period is not included.`);
+  $('adsets-note').textContent = notes.join(' ');
+}
+
+function exportAdsetsCsv() {
+  const columns = adsetColumns().map((c) => (c.type === 'text'
+    ? { title: c.title, type: 'text', value: c.get }
+    : { title: c.title, type: 'number', digits: ['impressions', 'clicks'].includes(c.key) ? 0 : 4, value: c.get }));
+  download(buildCsv(columns, adsetRows()), `ff-ads-${state.view}-${state.view === 'google' ? 'ad-groups' : 'ad-sets'}_${state.filters.from}_${state.filters.to}.csv`);
+}
+
+// ---------- Видео Meta ----------
+
+// Показатели видео: hook rate — просмотры от 3 секунд к показам (ролик зацепил), ThruPlay rate — досмотры до конца
+// или 15+ секунд к показам, досмотры 25…100 % — к запускам ролика, среднее время — секунды на запуск.
+const r0 = (a, b) => (b > 0 ? a / b : null);
+const VIDEO_KPIS = [
+  { title: 'Plays', get: (s) => s.plays, format: fmt.int, better: 'conversions' },
+  { title: 'Hook rate (3-sec views ÷ impressions)', get: (s) => r0(s.views, s.impressions), format: (v) => fmt.pct(v, 1), better: 'conversions' },
+  { title: 'ThruPlay rate (ThruPlays ÷ impressions)', get: (s) => r0(s.thruplay, s.impressions), format: (v) => fmt.pct(v, 1), better: 'conversions' },
+  { title: 'Cost per ThruPlay', get: (s) => r0(s.spend, s.thruplay), format: fmt.money2, better: 'cpa' },
+  { title: 'Watched to the end (of plays)', get: (s) => r0(s.p100, s.plays), format: (v) => fmt.pct(v, 1), better: 'conversions' },
+  { title: 'Avg. watch time', get: (s) => r0(s.watch, s.plays), format: (v) => (v === null ? fmt.DASH : `${v.toFixed(1)} s`), better: 'conversions' },
+];
+const VIDEO_ROWS = 200;
+
+function videoColumns() {
+  const pct = (v) => fmt.pct(v, 0);
+  return [
+    { title: 'Ad', type: 'text', get: (r) => r.name || r.ad_id, cell: (r) => el('td', { class: 'text name', text: r.name || r.ad_id, title: r.name || undefined }) },
+    { title: 'Campaign', type: 'text', get: (r) => r.campaign, cell: (r) => el('td', { class: 'text name', text: r.campaign, title: r.campaign }) },
+    { title: 'Spend', get: (r) => r.spend, format: fmt.money },
+    { title: 'Impressions', get: (r) => r.impressions, format: fmt.int },
+    { title: 'Plays', get: (r) => r.plays, format: fmt.int },
+    { title: 'Hook rate', get: (r) => r0(r.views, r.impressions), format: (v) => fmt.pct(v, 1) },
+    { title: '25%', get: (r) => r0(r.p25, r.plays), format: pct },
+    { title: '50%', get: (r) => r0(r.p50, r.plays), format: pct },
+    { title: '75%', get: (r) => r0(r.p75, r.plays), format: pct },
+    { title: '100%', get: (r) => r0(r.p100, r.plays), format: pct },
+    { title: 'ThruPlays', get: (r) => r.thruplay, format: fmt.int },
+    { title: 'Cost / ThruPlay', get: (r) => r0(r.spend, r.thruplay), format: fmt.money2 },
+    { title: 'Avg. watch (s)', get: (r) => r0(r.watch, r.plays), format: (v) => (v === null ? fmt.DASH : v.toFixed(1)) },
+    { title: label('conversions'), get: (r) => r.conversions, format: fmt.num },
+    { title: label('cpa'), get: (r) => r0(r.spend, r.conversions), format: fmt.money2 },
+  ].map((c) => ({ ...c, cell: c.cell ?? ((r) => el('td', { text: c.format(c.get(r)) })) }));
+}
+
+function renderVideos() {
+  const v = state.metaVideos;
+  const show = state.view === 'meta' && Boolean(v?.available) && v.rows.length > 0;
+  $('video-section').hidden = !show;
+  if (!show) return;
+  const cur = v.current;
+  const prev = v.previous;
+  $('video-kpis').replaceChildren(...VIDEO_KPIS.map((k) => {
+    const c = k.get(cur);
+    const p = k.get(prev);
+    const d = delta(c, p);
+    const t = tone(k.better, d);
+    return el('div', { class: 'card video-kpi' }, el('span', { class: 'label', text: k.title }),
+      el('b', { text: k.format(c) }),
+      el('span', { class: 'delta', dataset: { tone: t }, text: d === null ? fmt.DASH : `${d > 0 ? '▲ ' : d < 0 ? '▼ ' : ''}${fmt.signedPct(d)}` }));
+  }));
+  // Удержание: доля запусков, досмотренных до 25 / 50 / 75 / 100 %.
+  const steps = [['Started', cur.plays], ['3-sec views', cur.views], ['Watched 25%', cur.p25], ['Watched 50%', cur.p50], ['Watched 75%', cur.p75], ['Watched 100%', cur.p100]];
+  $('video-retention').replaceChildren(el('h3', { text: 'Viewer retention' }), ...steps.map(([name, n]) => {
+    const share = r0(n, cur.plays);
+    const fill = el('div');
+    fill.style.width = `${share ? Math.max(1, Math.min(100, share * 100)).toFixed(1) : 0}%`;
+    return el('div', { class: 'funnel-step' },
+      el('div', { class: 'row' }, el('span', { text: name }), el('b', { text: `${fmt.int(n)} · ${fmt.pct(share, 0)}` })),
+      el('div', { class: 'track', 'aria-hidden': 'true' }, fill));
+  }));
+  const cols = videoColumns();
+  $('video-table').tHead.rows[0].replaceChildren(...cols.map((c) => el('th', { scope: 'col', class: c.type === 'text' ? 'text' : undefined, text: c.title })));
+  const frag = document.createDocumentFragment();
+  for (const r of v.rows.slice(0, VIDEO_ROWS)) frag.append(el('tr', {}, ...cols.map((c) => c.cell(r))));
+  $('video-table').tBodies[0].replaceChildren(frag);
+  $('video-count').textContent = `(${fmt.int(v.rows.length)})`;
+  const notes = [
+    'Only ads with a video (with video plays in the period); image and carousel ads are not included. Metrics as counted by Meta.',
+    'Hook rate — 3-second views per impression; ThruPlay — watched to the end or at least 15 seconds; 25–100% — share of plays watched to that point.',
+    `Changes are vs ${state.summary?.period.compare === 'yoy' ? 'last year' : 'the previous period'}. Video data is kept for the last 13 months${v.dataFrom ? ` (available from ${fmt.date(v.dataFrom)})` : ''}.`,
+  ];
+  if (v.rows.length > VIDEO_ROWS) notes.push(`Showing the first ${fmt.int(VIDEO_ROWS)} ads by spend — download CSV for the full list.`);
+  $('video-note').textContent = notes.join(' ');
+}
+
+function exportVideosCsv() {
+  const columns = videoColumns().map((c) => (c.type === 'text' ? { title: c.title, type: 'text', value: c.get } : { title: c.title, type: 'number', digits: 4, value: c.get }));
+  download(buildCsv(columns, state.metaVideos?.rows ?? []), `ff-ads-meta-video_${state.filters.from}_${state.filters.to}.csv`);
+}
+
+// ---------- Оценки качества объявлений Meta ----------
+
+// Оценка Meta → подпись и тон: выше среднего — хорошо, нижние 35 / 20 / 10 % — плохо (чем ниже, тем ярче).
+const RANKS = {
+  ABOVE_AVERAGE: { text: 'Above average', tone: 'good' },
+  AVERAGE: { text: 'Average', tone: 'neutral' },
+  BELOW_AVERAGE_35: { text: 'Below · bottom 35%', tone: 'bad', level: 1 },
+  BELOW_AVERAGE_20: { text: 'Below · bottom 20%', tone: 'bad', level: 2 },
+  BELOW_AVERAGE_10: { text: 'Below · bottom 10%', tone: 'bad', level: 3 },
+};
+const QUALITY_KEYS = [['quality', 'Quality'], ['engagement', 'Engagement rate'], ['conversion', 'Conversion rate']];
+const QUALITY_ROWS = 200;
+const isBelow = (r) => QUALITY_KEYS.some(([k]) => RANKS[r[k]]?.tone === 'bad');
+
+function rankCell(v) {
+  const r = RANKS[v];
+  if (!r) return el('td', { class: 'text muted', text: fmt.DASH, title: 'Fewer than 500 impressions or not enough data' });
+  return el('td', { class: 'text' }, el('span', { class: 'rank-tag', dataset: r.level ? { tone: r.tone, level: r.level } : { tone: r.tone }, text: r.text }));
+}
+
+function renderQuality() {
+  const q = state.metaQuality;
+  const show = state.view === 'meta' && Boolean(q?.available);
+  $('quality-section').hidden = !show;
+  if (!show) return;
+  const all = q.rows;
+  const ranked = all.filter((r) => QUALITY_KEYS.some(([k]) => RANKS[r[k]]));
+  const spendOf = (list) => list.reduce((t, r) => t + (r.spend ?? 0), 0);
+  const totalSpend = spendOf(ranked);
+  // Сводка: по каждой оценке — доля расхода объявлений выше среднего, среднего и ниже среднего.
+  $('quality-summary').replaceChildren(...QUALITY_KEYS.map(([k, title]) => {
+    const groups = [['good', 'Above'], ['neutral', 'Average'], ['bad', 'Below']].map(([tone, name]) => {
+      const list = ranked.filter((r) => RANKS[r[k]]?.tone === tone);
+      return { tone, name, n: list.length, share: totalSpend > 0 ? spendOf(list) / totalSpend : 0 };
+    });
+    const bar = el('div', { class: 'rank-bar', 'aria-hidden': 'true' }, ...groups.map((g) => {
+      const seg = el('span', { dataset: { tone: g.tone } });
+      seg.style.width = `${(g.share * 100).toFixed(1)}%`;
+      return seg;
+    }));
+    return el('div', { class: 'card quality-card' },
+      el('h3', { text: title }), bar,
+      el('p', { class: 'quality-legend' }, ...groups.map((g) => el('span', { dataset: { tone: g.tone }, text: `${g.name}: ${g.n} ads · ${fmt.pct(g.share, 0)} of spend` }))));
+  }));
+  const rows = (state.qualityBelow ? all.filter(isBelow) : all);
+  const head = ['Ad', 'Campaign', 'Spend (7 days)', 'Impressions', ...QUALITY_KEYS.map(([, t]) => t)];
+  $('quality-table').tHead.rows[0].replaceChildren(...head.map((t, i) => el('th', { scope: 'col', class: i < 2 || i > 3 ? 'text' : undefined, text: t })));
+  const body = $('quality-table').tBodies[0];
+  if (!rows.length) {
+    body.replaceChildren(el('tr', {}, el('td', { colspan: head.length, class: 'text muted', text: state.qualityBelow ? 'No ads ranked below average' : 'No ads with impressions in the last 7 days' })));
+  } else {
+    const frag = document.createDocumentFragment();
+    for (const r of rows.slice(0, QUALITY_ROWS)) {
+      frag.append(el('tr', {},
+        el('td', { class: 'text name', text: r.name || r.ad_id, title: r.name || undefined }),
+        el('td', { class: 'text name', text: r.campaign, title: r.campaign }),
+        el('td', { text: r.spend === null ? fmt.DASH : fmt.money(r.spend) }),
+        el('td', { text: fmt.int(r.impressions) }),
+        ...QUALITY_KEYS.map(([k]) => rankCell(r[k]))));
+    }
+    body.replaceChildren(frag);
+  }
+  const below = all.filter(isBelow);
+  $('quality-count').textContent = `(${fmt.int(all.length)} ads, ${fmt.int(below.length)} below average)`;
+  const notes = [
+    `Meta ad relevance diagnostics for ads with impressions from ${fmt.date(q.from)} to ${fmt.date(q.to)} (updated ${fmt.dateTime(q.at)}); spend and impressions — for these 7 days, the selected period does not apply.`,
+    'Each ranking compares the ad with ads competing for the same audience over the last 35 days: quality (feedback and signs of low quality), expected engagement rate and expected conversion rate. Rankings are given only to ads with 500+ impressions.',
+    'Meta recommends using them to diagnose ads that miss their goals, not as a goal in themselves. Summary bars — share of spend of ranked ads.',
+  ];
+  if (rows.length > QUALITY_ROWS) notes.push(`Showing the first ${fmt.int(QUALITY_ROWS)} ads by spend.`);
+  $('quality-note').textContent = notes.join(' ');
+}
+
+// ---------- Снимки за последние дни (таблицы без сортировки): колонки — [заголовок, текст ячейки, класс, tone, title] ----------
+
+const SNAP_ROWS = 60;
+function renderSnapTable(id, columns, rows, empty) {
+  const table = $(id);
+  table.tHead.rows[0].replaceChildren(...columns.map((c) => el('th', { scope: 'col', class: c.text ? 'text' : undefined, text: c.title, title: c.hint ?? null })));
+  const body = table.tBodies[0];
+  if (!rows.length) {
+    body.replaceChildren(el('tr', {}, el('td', { colspan: columns.length, class: 'text muted', text: empty })));
+    return;
+  }
+  const frag = document.createDocumentFragment();
+  for (const r of rows.slice(0, SNAP_ROWS)) {
+    frag.append(el('tr', {}, ...columns.map((c) => {
+      const v = c.cell(r);
+      const cell = v && typeof v === 'object' && !(v instanceof Node) ? v : { text: v };
+      return el('td', {
+        class: c.text ? 'text name' : undefined, title: cell.title ?? (c.text ? cell.text : null),
+        dataset: cell.tone ? { hl: cell.tone } : {},
+      }, cell.node ?? String(cell.text ?? fmt.DASH));
+    })));
+  }
+  body.replaceChildren(frag);
+}
+
+const signedPct = (v, digits = 0) => (v === null || v === undefined ? '' : `${v > 0 ? '+' : v < 0 ? '−' : ''}${fmt.pct(Math.abs(v), digits)}`);
+const change = (cur, prev) => (cur !== null && cur !== undefined && prev > 0 ? cur / prev - 1 : null);
+
+// ---------- Выгорание креативов Meta ----------
+
+const FLAG_LABELS = { fatigue: 'Fatigue', high_frequency: 'High frequency' };
+function renderFatigue() {
+  const q = state.metaAds;
+  const show = state.view === 'meta' && Boolean(q?.available);
+  $('fatigue-section').hidden = !show;
+  if (!show) return;
+  const all = q.rows.filter((r) => r.current);
+  const flagged = all.filter((r) => r.flags.length);
+  const rows = state.fatigueFlagged ? flagged : all;
+  const rule = q.rules;
+  const ratio = (v) => (v === null || v === undefined ? fmt.DASH : fmt.ratio(v));
+  const columns = [
+    { title: 'Ad', text: true, cell: (r) => r.name || r.ad_id },
+    { title: 'Campaign', text: true, cell: (r) => r.campaign },
+    { title: 'Spend', cell: (r) => (r.current.spend === null ? fmt.DASH : fmt.money(r.current.spend)) },
+    { title: 'Frequency', hint: 'Impressions per person over 7 days (previous 7 days in the tooltip)', cell: (r) => ({
+      text: ratio(r.current.frequency), tone: r.current.frequency >= rule.highFrequency ? 'bad' : null,
+      title: `7 days: ${ratio(r.current.frequency)}; previous 7: ${ratio(r.previous?.frequency)}. Red from ${fmt.ratio(rule.highFrequency)}.`,
+    }) },
+    { title: 'CTR (link)', cell: (r) => ({
+      text: r.current.ctr === null ? fmt.DASH : `${fmt.pct(r.current.ctr, 2)} ${signedPct(r.ctrChange)}`.trim(),
+      tone: r.ctrChange !== null && r.ctrChange <= -rule.fatigueCtrDrop ? 'bad' : r.ctrChange !== null && r.ctrChange >= rule.fatigueCtrDrop ? 'good' : null,
+      title: `7 days: ${r.current.ctr === null ? fmt.DASH : fmt.pct(r.current.ctr, 2)}; previous 7: ${r.previous?.ctr == null ? fmt.DASH : fmt.pct(r.previous.ctr, 2)}`,
+    }) },
+    { title: 'Purchases', cell: (r) => fmt.int(r.current.conversions) },
+    { title: 'Cost / purchase', cell: (r) => ({
+      text: r.current.cpa === null ? fmt.DASH : `${fmt.money(r.current.cpa)} ${signedPct(change(r.current.cpa, r.previous?.cpa))}`.trim(),
+      title: `Previous 7 days: ${r.previous?.cpa == null ? fmt.DASH : fmt.money(r.previous.cpa)}`,
+    }) },
+    { title: 'ROAS', cell: (r) => ({ text: ratio(r.current.roas), tone: r.goal === 'sales' && (!r.optimization || r.optimization === 'purchase') && r.current.roas !== null ? (r.current.roas >= ROAS_TARGET ? 'good' : 'bad') : null, title: `Previous 7 days: ${ratio(r.previous?.roas)}` }) },
+    { title: 'Signal', text: true, cell: (r) => ({ text: r.flags.map((x) => FLAG_LABELS[x] ?? x).join(', ') || '', tone: r.flags.includes('fatigue') ? 'bad' : null }) },
+  ];
+  renderSnapTable('fatigue-table', columns, rows, state.fatigueFlagged ? 'No flagged ads' : 'No ads with impressions in the last 7 days');
+  $('fatigue-count').textContent = `(${fmt.int(all.length)} ads, ${fmt.int(flagged.length)} flagged)`;
+  $('fatigue-note').textContent = [
+    `Ads with impressions from ${fmt.date(q.current.from)} to ${fmt.date(q.current.to)} compared with ${fmt.date(q.previous.from)} — ${fmt.date(q.previous.to)} (updated ${fmt.dateTime(q.at)}); the selected period does not apply.`,
+    `Fatigue — frequency ${fmt.ratio(rule.fatigueFrequency)}+ and link CTR down ${fmt.pct(rule.fatigueCtrDrop, 0)}+ vs the previous week, with ${fmt.int(rule.minImpressions)}+ impressions in both weeks: the audience has seen the ad and reacts less — refresh the creative or widen the audience.`,
+    `High frequency — ${fmt.ratio(rule.highFrequency)}+ impressions per person in 7 days.`,
+    rows.length > SNAP_ROWS ? `Showing the first ${fmt.int(SNAP_ROWS)} ads by spend.` : '',
+  ].filter(Boolean).join(' ');
+}
+
+// ---------- Google Ads: доля показов и поисковые запросы ----------
+
+// Доля: «< 10 %» Google отдаёт как 0.0999, «> 90 %» потерянной доли — как 0.9001.
+const shareText = (v) => (v === null || v === undefined ? fmt.DASH : v <= 0.0999 && v > 0.0998 ? '< 10%' : v >= 0.9001 && v < 0.9002 ? '> 90%' : fmt.pct(v, 0));
+const SHARE_LOST = 0.2;
+function renderShare() {
+  const g = state.share;
+  const show = state.view === 'google' && Boolean(g?.available);
+  $('share-section').hidden = !show;
+  if (!show) return;
+  const all = g.rows.filter((r) => r.current);
+  const losing = (r) => (r.current.lostBudget ?? 0) >= SHARE_LOST || (r.current.lostRank ?? 0) >= SHARE_LOST;
+  const rows = state.shareLost ? all.filter(losing) : all;
+  const diff = (r, k) => {
+    const c = r.current?.[k];
+    const p = r.previous?.[k];
+    return c === null || c === undefined || p === null || p === undefined ? '' : `${c - p >= 0 ? '+' : '−'}${fmt.int(Math.abs(c - p) * 100)} pp`;
+  };
+  const shareCell = (k, badFrom) => (r) => ({
+    text: `${shareText(r.current[k])} ${diff(r, k)}`.trim(),
+    tone: badFrom !== undefined && (r.current[k] ?? 0) >= badFrom ? 'bad' : null,
+    title: `Last 7 days: ${shareText(r.current[k])}; previous 7: ${shareText(r.previous?.[k])}`,
+  });
+  const columns = [
+    { title: 'Campaign', text: true, cell: (r) => r.campaign },
+    { title: 'Type', text: true, cell: (r) => (r.channel === 'shopping' ? 'Shopping' : 'Search') },
+    { title: 'Cost', cell: (r) => (r.current.spend === null ? fmt.DASH : fmt.money(r.current.spend)) },
+    { title: 'ROAS', cell: (r) => ({ text: r.current.roas === null ? fmt.DASH : fmt.ratio(r.current.roas), tone: r.current.roas === null ? null : r.current.roas >= ROAS_TARGET ? 'good' : 'bad' }) },
+    { title: 'Impr. share', hint: 'Impressions received ÷ impressions the campaign was eligible for', cell: shareCell('share') },
+    { title: 'Lost: budget', hint: 'Share of eligible impressions lost because the daily budget ran out', cell: shareCell('lostBudget', SHARE_LOST) },
+    { title: 'Lost: rank', hint: 'Share lost because of Ad Rank (bid, quality, ad assets)', cell: shareCell('lostRank', SHARE_LOST) },
+    { title: 'Top', hint: 'Share of impressions shown above the organic results', cell: shareCell('top') },
+    { title: 'Abs. top', hint: 'Share shown as the very first ad', cell: shareCell('absTop') },
+  ];
+  renderSnapTable('share-table', columns, rows, state.shareLost ? 'No campaigns losing 20%+ of impressions' : 'No Search or Shopping campaigns with impressions in the last 7 days');
+  $('share-count').textContent = `(${fmt.int(all.length)} campaigns, ${fmt.int(all.filter(losing).length)} losing ${fmt.pct(SHARE_LOST, 0)}+)`;
+  $('share-note').textContent = [
+    `Search and Shopping campaigns, ${fmt.date(g.current.from)} — ${fmt.date(g.current.to)}; change in percentage points vs ${fmt.date(g.previous.from)} — ${fmt.date(g.previous.to)} (updated ${fmt.dateTime(g.at)}); the selected period does not apply.`,
+    `Lost: budget ${fmt.pct(SHARE_LOST, 0)}+ with ROAS at the target ${fmt.ratio(ROAS_TARGET)}+ — the campaign could get more sales with a bigger budget. Lost: rank — raise bids or improve ads and landing pages.`,
+    'Google reports shares below 10% as “< 10%” and lost shares above 90% as “> 90%”. Performance Max does not report impression share.',
+  ].join(' ');
+}
+
+const TERM_STATUS = { added: 'Keyword', excluded: 'Negative', added_excluded: 'Keyword + negative', none: '' };
+function renderTerms() {
+  const g = state.terms;
+  const show = state.view === 'google' && Boolean(g?.available);
+  $('terms-section').hidden = !show;
+  if (!show) return;
+  const all = g.rows;
+  const spends = all.map((r) => r.spend ?? 0).sort((a, b) => b - a);
+  // «Расход без конверсий» — запросы без конверсий с расходом не меньше медианной цены покупки по запросам с покупками.
+  const cpas = all.filter((r) => r.cpa !== null).map((r) => r.cpa).sort((a, b) => a - b);
+  const wasteFrom = cpas.length ? cpas[Math.floor(cpas.length / 2)] : (spends[Math.floor(spends.length / 10)] ?? 0);
+  const waste = (r) => !(r.conversions > 0) && (r.spend ?? 0) >= wasteFrom && r.status !== 'excluded';
+  const rows = state.termsWaste ? all.filter(waste) : all;
+  const columns = [
+    { title: 'Search term', text: true, cell: (r) => r.term },
+    { title: 'Campaign', text: true, cell: (r) => r.campaign },
+    { title: 'Status', text: true, cell: (r) => TERM_STATUS[r.status] ?? '' },
+    { title: 'Cost', cell: (r) => ({ text: r.spend === null ? fmt.DASH : fmt.money(r.spend), tone: waste(r) ? 'bad' : null, title: waste(r) ? `No conversions with cost ≥ ${fmt.money(wasteFrom)} (median cost per conversion)` : null }) },
+    { title: 'Clicks', cell: (r) => fmt.int(r.clicks) },
+    { title: 'CTR', cell: (r) => (r.ctr === null ? fmt.DASH : fmt.pct(r.ctr, 1)) },
+    { title: 'Conv.', cell: (r) => fmt.ratio(r.conversions) },
+    { title: 'Cost / conv.', cell: (r) => (r.cpa === null ? fmt.DASH : fmt.money(r.cpa)) },
+    { title: 'ROAS', cell: (r) => ({ text: r.roas === null ? fmt.DASH : fmt.ratio(r.roas), tone: r.roas === null || !(r.spend > 0) ? null : r.roas >= ROAS_TARGET ? 'good' : 'bad' }) },
+  ];
+  renderSnapTable('terms-table', columns, rows, state.termsWaste ? 'No search terms with spend and no conversions' : 'No search terms in the last 30 days');
+  $('terms-count').textContent = `(${fmt.int(all.length)} terms, ${fmt.int(all.filter(waste).length)} with spend and no conversions)`;
+  $('terms-note').textContent = [
+    `What people typed before clicking Search ads, ${fmt.date(g.from)} — ${fmt.date(g.to)} (updated ${fmt.dateTime(g.at)}); the selected period does not apply. Sorted by cost.`,
+    `Red cost — no conversions and cost at least the median cost per conversion (${fmt.money(wasteFrom)}): candidates for negative keywords. Status — the term is already a keyword or a negative.`,
+    'Google hides terms with few searches (privacy), so terms do not add up to campaign totals. Performance Max search terms are not included.',
+  ].join(' ');
+}
+
+// ---------- Качество событий Meta (EMQ) ----------
+
+// Оценки Meta: 8–10 — отлично, 6–7.9 — хорошо, ниже 6 — данных о покупателе мало для сопоставления.
+const EMQ_GOOD = 8;
+const EMQ_LOW = 6;
+const EMQ_KEYS = { em: 'Email', ph: 'Phone', fn: 'First name', ln: 'Last name', ct: 'City', st: 'Region', zp: 'ZIP', country: 'Country', ge: 'Gender', db: 'Birth date', external_id: 'External ID', client_ip_address: 'IP address', client_user_agent: 'User agent', fbc: 'Click ID (fbc)', fbp: 'Browser ID (fbp)' };
+function renderEmq() {
+  const e = state.emq;
+  const show = state.view === 'meta' && Boolean(e?.available);
+  $('emq-section').hidden = !show;
+  if (!show) return;
+  const rows = e.pixels.flatMap((p) => (p.events.length ? p.events.map((ev) => ({ pixel: p, ...ev })) : [{ pixel: p, event: null }]));
+  const columns = [
+    { title: 'Dataset (pixel)', text: true, cell: (r) => ({ text: r.pixel.name || r.pixel.pixel_id, title: `ID ${r.pixel.pixel_id}${r.pixel.last_fired ? ` · last event ${r.pixel.last_fired.slice(0, 10)}` : ''}` }) },
+    { title: 'Event', text: true, cell: (r) => r.event ?? 'No server (Conversions API) events' },
+    { title: 'Match quality', hint: 'Event match quality, 0–10: how well customer data in server events matches Meta accounts', cell: (r) => (r.event === null || r.score === null ? fmt.DASH : {
+      text: `${fmt.ratio(r.score)} / 10`, tone: r.score >= EMQ_GOOD ? 'good' : r.score < EMQ_LOW ? 'bad' : null,
+    }) },
+    { title: 'Server coverage', hint: 'Share of pixel events also sent through the Conversions API with a matching dedup key (7 days)', cell: (r) => (r.coverage == null ? fmt.DASH : fmt.pct(r.coverage / 100, 0)) },
+    { title: 'Upload', text: true, cell: (r) => (r.freshness ?? '').replace(/_/g, ' ').toLowerCase() },
+    { title: 'Weakest keys', text: true, cell: (r) => (r.keys?.length ? [...r.keys].filter((k) => k.coverage !== null).sort((a, b) => a.coverage - b.coverage).slice(0, 3)
+      .map((k) => `${EMQ_KEYS[k.key] ?? k.key} ${fmt.pct(k.coverage / 100, 0)}`).join(', ') : '') },
+  ];
+  renderSnapTable('emq-table', columns, rows, 'No datasets (pixels) found in the ad accounts');
+  const low = rows.filter((r) => r.score != null && r.score < EMQ_LOW).length;
+  $('emq-count').textContent = `(${fmt.int(e.pixels.length)} datasets${low ? `, ${fmt.int(low)} events below ${EMQ_LOW}` : ''})`;
+  $('emq-note').textContent = [
+    `Meta event match quality for website events sent through the Conversions API (updated ${fmt.dateTime(e.at)}); the selected period does not apply.`,
+    `Green — ${EMQ_GOOD}+ (great), red — below ${EMQ_LOW}: Meta matches fewer purchases to people, so optimization and reported conversions suffer. Raise it by sending more customer keys (email, phone, external ID, fbc / fbp) with server events.`,
+    'Weakest keys — customer keys present in the smallest share of events.',
+  ].join(' ');
+}
+
+// ---------- Креативы Admixer (баннеры) ----------
+
+function creativeColumns() {
+  const cur = state.creatives?.currency ?? 'EUR';
+  const metric = (key, title, get, format) => ({ key, title, type: 'number', get, cell: (r) => el('td', { text: format(get(r)) }) });
+  return [
+    { key: 'creative', title: 'Creative', type: 'text', get: (r) => r.profile, cell: (r) => el('td', { class: 'text name', text: r.profile, title: r.profile }) },
+    { key: 'size', title: 'Size', type: 'text', get: (r) => r.domain, cell: (r) => el('td', { class: 'text', text: r.domain }) },
+    { key: 'campaign', title: 'Campaign', type: 'text', get: (r) => r.campaign, cell: (r) => el('td', { class: 'text name', text: r.campaign || fmt.DASH, title: r.campaign || undefined }) },
+    { key: 'brand', title: 'Brand', type: 'text', get: (r) => r.brand, cell: (r) => el('td', { class: 'text', text: BRAND_LABELS[r.brand] ?? r.brand ?? fmt.DASH }) },
+    { key: 'partner', title: 'Partner brand', type: 'text', get: (r) => r.partner || '', cell: (r) => el('td', { class: r.partner ? 'text' : 'text muted', text: r.partner || PARTNER_NONE_LABEL }) },
+    metric('impressions', 'Impressions', (r) => r.impressions, fmt.int),
+    metric('clicks', 'Clicks', (r) => r.clicks, fmt.int),
+    metric('ctr', 'CTR', (r) => ratioOf(r.clicks, r.impressions), METRICS.ctr.format),
+    metric('cpm', 'CPM', (r) => ratioOf(r.spend * 1000, r.impressions), fmt.money2),
+    metric('cpc', 'CPC', (r) => ratioOf(r.spend, r.clicks), fmt.money2),
+    metric('viewability', 'Viewability', (r) => ratioOf(r.viewable, r.impressions), (v) => fmt.pct(v, 1)),
+    metric('spend', 'Spend', (r) => r.spend, fmt.money2),
+    metric('spendNative', `Spend, ${cur}`, (r) => r.spendNative, (v) => (typeof v === 'number' ? `${fmt.ratio(v)} ${cur}` : fmt.DASH)),
+  ];
+}
+
+function creativeRows() {
+  const p = state.creatives;
+  if (!p?.available) return [];
+  const q = state.creativesSearch.trim().toLocaleLowerCase('ru');
+  const rows = q ? p.rows.filter((r) => `${r.profile} ${r.domain} ${r.campaign} ${r.partner}`.toLocaleLowerCase('ru').includes(q)) : p.rows;
+  const col = creativeColumns().find((c) => c.key === state.creativesSort.key) ?? creativeColumns().find((c) => c.key === 'impressions');
+  const dir = state.creativesSort.dir === 'asc' ? 1 : -1;
+  return [...rows].sort((a, b) => {
+    const va = col.get(a);
+    const vb = col.get(b);
+    if (va === null || va === undefined) return 1;
+    if (vb === null || vb === undefined) return -1;
+    if (col.type === 'text') return dir * String(va).localeCompare(String(vb), 'ru');
+    return dir * (va - vb);
+  });
+}
+
+function renderCreatives() {
+  const p = state.creatives;
+  const show = state.view === 'admixer' && Boolean(p?.available);
+  $('creatives-section').hidden = !show;
+  if (!show) return;
+  const columns = creativeColumns();
+  $('creatives-table').tHead.rows[0].replaceChildren(...columns.map((c) => el('th', {
+    scope: 'col', class: `sortable${c.type === 'text' ? ' text' : ''}`,
+    'aria-sort': state.creativesSort.key === c.key ? (state.creativesSort.dir === 'asc' ? 'ascending' : 'descending') : 'none',
+  }, el('button', { type: 'button', dataset: { key: c.key }, text: c.title }))));
+  const rows = creativeRows();
+  const body = $('creatives-table').tBodies[0];
+  if (!rows.length) {
+    body.replaceChildren(el('tr', {}, el('td', { colspan: columns.length, class: 'text muted', text: 'No creative data for the selected period' })));
+  } else {
+    const frag = document.createDocumentFragment();
+    for (const r of rows.slice(0, PLACEMENTS_ROWS)) frag.append(el('tr', {}, ...columns.map((c) => c.cell(r))));
+    body.replaceChildren(frag);
+  }
+  $('creatives-count').textContent = `(${fmt.int(rows.length)})`;
+  const notes = ['Admixer statistics by creative (banner). Campaign — through the profile (ad set) with the most impressions of the creative. '
+    + `Spend, CPM and CPC — in MDL at the NBM rate; Spend, ${p.currency} — as in the Admixer account. Viewability — share of viewable impressions.`];
+  if (p.mode === 'monthly' && p.months) {
+    notes.push(`Totals for whole months: ${fmt.monthName(p.months[0])} — ${fmt.monthName(p.months[1])} (data by day is available from ${fmt.date(p.dailyFrom)}).`);
+  }
+  if (p.dataFrom && state.filters.from.slice(0, 7) < p.dataFrom) notes.push(`Creative data is available from ${fmt.monthName(p.dataFrom)}.`);
+  notes.push('Partner brand — by the creative name, from the list config/partner-brands.txt in the code repository (docs/CONNECT.md, “Partner brands”).');
+  if (p.partnerWarnings?.length) notes.push(`Brand list warnings: ${p.partnerWarnings.join('; ')}.`);
+  $('creatives-note').textContent = notes.join(' ');
+}
+
+function exportCreativesCsv() {
+  const columns = creativeColumns().map((c) => (c.type === 'text'
+    ? { title: c.title, type: 'text', value: c.get }
+    : { title: ['spend', 'cpm', 'cpc'].includes(c.key) ? `${c.title}, MDL` : c.title, type: 'number', digits: ['impressions', 'clicks'].includes(c.key) ? 0 : 4, value: c.get }));
+  download(buildCsv(columns, creativeRows()), `ff-ads-admixer-creatives_${state.filters.from}_${state.filters.to}.csv`);
+}
+
+function exportPlacementsCsv() {
+  const rows = placementRows();
+  const columns = placementColumns().map((c) => (c.type === 'text'
+    ? { title: c.title, type: 'text', value: c.get }
+    : { title: ['spend', 'cpm', 'cpc'].includes(c.key) ? `${c.title}, MDL` : c.title, type: 'number', digits: ['impressions', 'clicks', 'sites'].includes(c.key) ? 0 : 4, value: c.get }));
+  download(buildCsv(columns, rows), `ff-ads-admixer-placements_${state.filters.from}_${state.filters.to}.csv`);
+}
+
+// ---------- Вкладка Shopify ----------
+
+// Как в Looker: главный блок — продажи, заказы, средний чек и MER; ряд — остальные показатели магазина;
+// ниже — реклама и трафик.
+const SHOP_HERO = ['shop_orders', 'shop_aov', 'shop_mer'];
+const SHOP_KPIS = ['shop_qty', 'shop_discounts', 'shop_customers', 'shop_returns', 'shop_qty_returned', 'shop_new_customers'];
+const SHOP_ADS = ['shop_ad_spend', 'shop_cpo', 'shop_sessions', 'shop_cr'];
+const SHOP_TABLE_ROWS = 300;
+const SOURCE_LABELS = { direct: 'Direct', search: 'Search', social: 'Social', email: 'Email', unknown: 'Other' };
+const sourceLabel = (v) => SOURCE_LABELS[v] ?? v.replace(/_/g, ' ').replace(/^./, (c) => c.toUpperCase());
+const CUSTOMERS_TITLE = 'Unique customers are counted for standard periods (This month, Last month, Last 7/30/90 days, '
+  + 'This quarter, Last 3/6/12 months, This year, Last year); for a custom period — not available';
+
+function shopPrevTitle(key, prev) {
+  const p = ({ omnisend: state.omnisend, overview: state.ga, seo: state.gsc, dataedge: state.dataedge, maps: state.maps, onesignal: state.onesignal }[state.view] ?? state.shopify).period;
+  return `${p.compare === 'yoy' ? 'Last year' : 'Previous period'} (${fmt.date(p.prevFrom)} — ${fmt.date(p.prevTo)}): ${extraMetric(key).format(prev)}`;
+}
+
+function shopKpi(key, s, cls = 'kpi') {
+  const cur = shopifyValue(key, s.current);
+  const prev = shopifyValue(key, s.previous);
+  const info = deltaInfo(key, cur, prev);
+  const title = key === 'shop_customers' && cur === null ? CUSTOMERS_TITLE : shopPrevTitle(key, prev);
+  return el(cls === 'kpi' ? 'article' : 'div', { class: cls, title, dataset: { metric: key } },
+    el('div', { class: 'label', text: extraMetric(key).label }),
+    el('div', { class: 'value', text: extraMetric(key).format(cur) }),
+    el('div', { class: 'delta', dataset: { tone: info.tone }, text: cur === null ? 'standard periods only' : info.text }));
+}
+
+function visibleProducts() {
+  const rows = state.shopProducts?.rows ?? [];
+  const q = state.shopSearch.trim().toLowerCase();
+  return q ? rows.filter((r) => r.title.toLowerCase().includes(q)) : rows;
+}
+
+function renderShopProducts() {
+  const p = state.shopProducts;
+  const rows = visibleProducts();
+  $('shop-products-count').textContent = p?.available ? `(${fmt.int(rows.length)})` : '';
+  $('shop-products').tBodies[0].replaceChildren(...rows.slice(0, SHOP_TABLE_ROWS).map((r) => el('tr', {},
+    el('td', { class: 'name', text: r.title }),
+    el('td', { text: fmt.int(r.orders) }),
+    el('td', { text: fmt.int(r.quantity) }),
+    el('td', { text: fmt.money2(r.sales) }))));
+  const notes = [];
+  if (p?.mode === 'monthly' && p.months) {
+    notes.push(`Totals for whole months: ${fmt.monthName(p.months[0])} — ${fmt.monthName(p.months[1])} (product data by day is available from ${fmt.date(p.dailyFrom)}).`);
+  }
+  if (rows.length > SHOP_TABLE_ROWS) notes.push(`Showing ${fmt.int(SHOP_TABLE_ROWS)} products with the highest sales — use search or download CSV for the full list.`);
+  if (p?.truncated) notes.push(`More than ${fmt.int(p.rows.length)} products — the list is limited to the ones with the highest sales.`);
+  $('shop-products-note').textContent = notes.join(' ');
+}
+
+function renderShopifyCharts() {
+  const s = state.shopify;
+  if (state.view !== 'shopify' || !s?.available) return;
+  charts.shopCombo('chart-shop-sales', s.series, 'shop_sales', 'shop_orders');
+  charts.shopLines('chart-shop-orders', s.series, ['shop_orders']);
+  charts.shopLines('chart-shop-aov', s.series, ['shop_aov']);
+  charts.shopLines('chart-shop-returns', s.series, ['shop_sales', 'shop_returns']);
+  const sources = s.referrer.filter((r) => r.current.sales > 0);
+  charts.shopSources('chart-shop-sources', sources, sourceLabel);
+  const total = sources.reduce((sum, r) => sum + r.current.sales, 0);
+  $('shop-sources-legend').replaceChildren(...sources.map((r, i) => {
+    const swatch = el('span', { class: 'swatch', 'aria-hidden': 'true' });
+    swatch.style.background = charts.shopSourceCssColor(i);
+    return el('li', { title: `${fmt.money(r.current.sales)} · ${fmt.int(r.current.orders)} orders` }, swatch,
+      el('span', { text: sourceLabel(r.source) }), el('span', { class: 'num', text: fmt.pct(r.current.sales / total, 1) }));
+  }));
+}
+
+function renderShopify() {
+  const s = state.shopify;
+  $('shopify-section').hidden = false;
+  if (!s?.available) {
+    $('hero').replaceChildren(el('div', { class: 'hero-main' },
+      el('div', { class: 'hero-label', text: 'Shopify' }),
+      el('div', { class: 'hero-sub', text: 'No Shopify data yet — the store is not connected or the first update has not run.' })));
+    $('kpis').replaceChildren();
+    $('shopify-section').hidden = true;
+    return;
+  }
+  const sales = s.current.total_sales;
+  const d = deltaInfo('shop_sales', sales, s.previous.total_sales);
+  $('hero').replaceChildren(
+    el('div', { class: 'hero-main' },
+      el('div', { class: 'hero-label', text: `Total sales · ${fmt.date(s.period.from)} — ${fmt.date(s.period.to)}` }),
+      el('div', { class: 'hero-value', title: shopPrevTitle('shop_sales', s.previous.total_sales) }, fmt.int(Math.round(sales)), el('small', { text: 'MDL' })),
+      el('div', { class: 'hero-sub' }, el('span', { class: 'delta', dataset: { tone: d.tone }, text: d.text }))),
+    el('div', { class: 'hero-kpis' }, ...SHOP_HERO.map((key) => shopKpi(key, s, 'hero-kpi'))));
+  $('kpis').replaceChildren(...SHOP_KPIS.map((key) => shopKpi(key, s)));
+  $('shop-kpis-ads').replaceChildren(...SHOP_ADS.map((key) => shopKpi(key, s)));
+  renderShopifyCharts();
+  renderShopProducts();
+  $('shop-note').textContent = 'Store metrics — as in Shopify Analytics (MDL). Avg. order value — (gross sales − discounts) / orders. '
+    + 'Discounts and returns are shown as positive amounts. MER — total sales per 1 MDL of ad spend (Meta, Google Ads, Admixer, all brands). '
+    + `Conversion rate — sessions that completed checkout / sessions. Shopify data is available from ${fmt.date(s.dataFrom)}.`;
+}
+
+function exportShopProductsCsv() {
+  const f = state.filters;
+  const columns = [
+    { title: 'Product', type: 'text', value: (r) => r.title },
+    { title: 'Orders', type: 'number', digits: 0, value: (r) => r.orders },
+    { title: 'Ordered quantity', type: 'number', digits: 0, value: (r) => r.quantity },
+    { title: 'Total sales, MDL', type: 'number', digits: 2, value: (r) => r.sales },
+  ];
+  download(buildCsv(columns, visibleProducts()), `ff-shopify-produse_${f.from}_${f.to}.csv`);
+}
+
+// Воронка: показы → клики → конверсии. Ширина полос — в логарифмической шкале,
+// иначе клики и конверсии на фоне миллионов показов не видны.
+// ---------- Вкладка Omnisend (push-кампании) ----------
+
+// Как в Looker: главный блок — отправки, открытия, open rate, click rate; ряд — остальные показатели;
+// ниже — заказы и выручка, графики, таблица кампаний, доли, дни недели и устройства.
+const OM_HERO = ['om_opened', 'om_open_rate', 'om_click_rate'];
+const OM_KPIS = ['om_campaigns', 'om_clicked', 'om_ctor', 'om_unsub_rate', 'om_bounces', 'om_complaint_rate'];
+const OM_SALES = ['om_orders', 'om_revenue', 'om_rps', 'om_unsubscribed'];
+const OM_SHARE_TOP = 9;
+const OM_DEVICE_LABELS = { Mobile: 'Mobile', Desktop: 'Desktop', Tablet: 'Tablet' };
+const WEEKDAY_NAMES = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
+
+function omColumns() {
+  const num = (key, title, get, format) => ({ key, title, type: 'number', get, cell: (r) => el('td', { text: format(get(r)) }) });
+  const m = (key) => extraMetric(key);
+  return [
+    { key: 'name', title: 'Campaign name', type: 'text', get: (r) => r.name, cell: (r) => el('td', { class: 'text name', text: r.name, title: `ID ${r.id}` }) },
+    { key: 'date', title: 'Sent', type: 'text', get: (r) => r.date, cell: (r) => el('td', { text: fmt.date(r.date) }) },
+    num('sent', 'Sends', (r) => r.sent, fmt.int),
+    num('opened', 'Opens', (r) => r.opened, fmt.int),
+    num('openRate', 'Open rate', (r) => m('om_open_rate').calc(r), fmt.pct),
+    num('clicked', 'Clicks', (r) => r.clicked, fmt.int),
+    num('clickRate', 'Click rate', (r) => m('om_click_rate').calc(r), fmt.pct),
+    num('ctor', 'CTOR', (r) => m('om_ctor').calc(r), fmt.pct),
+    num('unsubscribed', 'Unsubscribes', (r) => r.unsubscribed, fmt.int),
+    num('failed', 'Bounces', (r) => r.failed, fmt.int),
+    num('orders', 'Orders', (r) => r.orders, fmt.int),
+    num('revenue', 'Revenue', (r) => r.revenue, fmt.money),
+  ];
+}
+
+function omRows() {
+  const q = state.omSearch.trim().toLocaleLowerCase('ru');
+  const rows = (state.omnisend?.campaigns ?? []).filter((r) => !q || r.name.toLocaleLowerCase('ru').includes(q));
+  const col = omColumns().find((c) => c.key === state.omSort.key) ?? omColumns().find((c) => c.key === 'sent');
+  const dir = state.omSort.dir === 'asc' ? 1 : -1;
+  return rows.sort((a, b) => {
+    const va = col.get(a);
+    const vb = col.get(b);
+    if (va === null || va === undefined) return 1;
+    if (vb === null || vb === undefined) return -1;
+    if (col.type === 'text') return dir * String(va).localeCompare(String(vb), 'ru');
+    return dir * (va - vb);
+  });
+}
+
+function renderOmCampaigns() {
+  const columns = omColumns();
+  $('om-campaigns').tHead.rows[0].replaceChildren(...columns.map((c) => {
+    const sorted = state.omSort.key === c.key;
+    return el('th', {
+      scope: 'col',
+      class: `sortable${c.type === 'text' ? ' text' : ''}`,
+      'aria-sort': sorted ? (state.omSort.dir === 'asc' ? 'ascending' : 'descending') : 'none',
+    }, el('button', { type: 'button', dataset: { key: c.key }, text: c.title }));
+  }));
+  const rows = omRows();
+  const body = $('om-campaigns').tBodies[0];
+  if (rows.length === 0) {
+    body.replaceChildren(el('tr', {}, el('td', { colspan: columns.length, class: 'text muted', text: 'No push campaigns sent in the selected period' })));
+  } else {
+    const frag = document.createDocumentFragment();
+    for (const r of rows) frag.append(el('tr', {}, ...columns.map((c) => c.cell(r))));
+    body.replaceChildren(frag);
+  }
+  const total = state.omnisend?.campaigns.length ?? 0;
+  $('om-campaigns-count').textContent = rows.length === total ? `(${total})` : `(${rows.length} of ${total})`;
+}
+
+// Устройства — как «Platform performance» в Looker: открытия и клики, доли — от всех отправок периода.
+function omDeviceCard(d, s, total) {
+  const color = charts.omCampaignColor({ Mobile: 0, Desktop: 1, Tablet: 2 }[d.type] ?? 4);
+  const swatch = el('span', { class: 'swatch', 'aria-hidden': 'true' });
+  swatch.style.background = color;
+  const share = total > 0 ? d.current.opened / total : 0;
+  const fill = el('div');
+  fill.style.width = `${(share * 100).toFixed(1)}%`;
+  fill.style.background = color;
+  const rate = (x, sent) => (sent > 0 ? x / sent : null);
+  const metric = (labelText, key, cur, prev, format) => {
+    const info = deltaInfo(key, cur, prev);
+    return el('div', {},
+      el('div', { class: 'label', text: labelText }),
+      el('div', { class: 'value', text: format(cur) }),
+      el('div', { class: 'delta', dataset: { tone: info.tone }, text: info.short }));
+  };
+  return el('div', { class: 'platform-card static' },
+    el('div', { class: 'head' }, swatch, el('span', { class: 'name', text: OM_DEVICE_LABELS[d.type] ?? 'Other' }),
+      el('span', { class: 'share', title: 'Share of opens', text: fmt.pct(share, 1) })),
+    el('div', { class: 'track', 'aria-hidden': 'true' }, fill),
+    el('div', { class: 'metrics two' },
+      metric('Opens', 'om_opened', d.current.opened, d.previous.opened, fmt.int),
+      metric('Open rate', 'om_open_rate', rate(d.current.opened, s.current.sent), rate(d.previous.opened, s.previous.sent), fmt.pct),
+      metric('Clicks', 'om_clicked', d.current.clicked, d.previous.clicked, fmt.int),
+      metric('Click rate', 'om_click_rate', rate(d.current.clicked, s.current.sent), rate(d.previous.clicked, s.previous.sent), fmt.pct)));
+}
+
+function renderOmnisendCharts() {
+  const s = state.omnisend;
+  if (state.view !== 'omnisend' || !s?.available) return;
+  charts.shopCombo('chart-om-sends', s.series, 'om_opened', 'om_sent');
+  charts.shopLines('chart-om-open-rate', s.series, ['om_open_rate'], { spanGaps: true });
+  charts.shopLines('chart-om-click-rate', s.series, ['om_click_rate'], { spanGaps: true });
+  charts.shopLines('chart-om-bounce-rate', s.series, ['om_bounce_rate'], { spanGaps: true });
+  // Доли открытий: первые OM_SHARE_TOP кампаний и «Other».
+  const sorted = [...s.campaigns].filter((r) => r.opened > 0).sort((a, b) => b.opened - a.opened);
+  const share = sorted.slice(0, OM_SHARE_TOP).map((r) => ({ label: r.name, value: r.opened }));
+  const rest = sorted.slice(OM_SHARE_TOP).reduce((sum, r) => sum + r.opened, 0);
+  if (rest > 0) share.push({ label: 'Other', value: rest });
+  charts.omCampaigns('chart-om-share', share);
+  const total = share.reduce((sum, r) => sum + r.value, 0);
+  $('om-share-legend').replaceChildren(...share.map((r, i) => {
+    const swatch = el('span', { class: 'swatch', 'aria-hidden': 'true' });
+    swatch.style.background = charts.omCampaignColor(i);
+    return el('li', { title: `${r.label}: ${fmt.int(r.value)} opens` }, swatch,
+      el('span', { text: r.label }), el('span', { class: 'num', text: fmt.pct(r.value / total, 1) }));
+  }));
+}
+
+function renderOmnisend() {
+  const s = state.omnisend;
+  $('omnisend-section').hidden = false;
+  if (!s?.available) {
+    $('hero').replaceChildren(el('div', { class: 'hero-main' },
+      el('div', { class: 'hero-label', text: 'Omnisend' }),
+      el('div', { class: 'hero-sub', text: 'No Omnisend data yet — the API key is not set or the first update has not run.' })));
+    $('kpis').replaceChildren();
+    $('omnisend-section').hidden = true;
+    return;
+  }
+  const sent = s.current.sent;
+  const d = deltaInfo('om_sent', sent, s.previous.sent);
+  $('hero').replaceChildren(
+    el('div', { class: 'hero-main' },
+      el('div', { class: 'hero-label', text: `Push sends · ${fmt.date(s.period.from)} — ${fmt.date(s.period.to)}` }),
+      el('div', { class: 'hero-value', title: shopPrevTitle('om_sent', s.previous.sent) }, fmt.int(sent)),
+      el('div', { class: 'hero-sub' }, el('span', { class: 'delta', dataset: { tone: d.tone }, text: d.text }))),
+    el('div', { class: 'hero-kpis' }, ...OM_HERO.map((key) => shopKpi(key, s, 'hero-kpi'))));
+  $('kpis').replaceChildren(...OM_KPIS.map((key) => shopKpi(key, s)));
+  $('om-kpis-sales').replaceChildren(...OM_SALES.map((key) => shopKpi(key, s)));
+  renderOmnisendCharts();
+  renderOmCampaigns();
+  const m = (key, w) => extraMetric(key).calc(w);
+  $('om-weekdays').tBodies[0].replaceChildren(...s.weekdays.filter((w) => w.sent > 0).map((w) => el('tr', {},
+    el('td', { text: WEEKDAY_NAMES[w.weekday] }),
+    el('td', { text: fmt.int(w.campaigns) }),
+    el('td', { text: fmt.int(w.sent) }),
+    el('td', { text: fmt.pct(m('om_open_rate', w)) }),
+    el('td', { text: fmt.pct(m('om_click_rate', w)) }),
+    el('td', { text: fmt.pct(m('om_ctor', w)) }),
+    el('td', { text: fmt.money2(m('om_rps', w)) }))));
+  const devices = s.devices.filter((x) => x.current.opened > 0 || x.previous.opened > 0);
+  // Как в Looker — Mobile и Desktop; планшеты и неопределённые — одной карточкой Other.
+  const main = devices.filter((x) => x.type === 'Mobile' || x.type === 'Desktop');
+  const other = devices.filter((x) => x.type !== 'Mobile' && x.type !== 'Desktop')
+    .reduce((acc, x) => {
+      for (const p of ['current', 'previous']) for (const k of ['opened', 'clicked']) acc[p][k] += x[p][k];
+      return acc;
+    }, { type: 'Other', current: { opened: 0, clicked: 0 }, previous: { opened: 0, clicked: 0 } });
+  const cards = other.current.opened > 0 ? [...main, other] : main;
+  const totalOpens = devices.reduce((sum, x) => sum + x.current.opened, 0);
+  $('om-devices').replaceChildren(...cards.map((x) => omDeviceCard(x, s, totalOpens)));
+  $('om-note').textContent = `Omnisend push campaigns, grouped by send date — as in Omnisend reports. Rates are shares of sends; `
+    + 'CTOR — clicks / opens. Orders and revenue — attributed to the campaigns by Omnisend'
+    + `${s.currency === 'MDL' ? '' : ` (converted from ${s.currency} to MDL at the NBM rate)`}. `
+    + 'Platform performance — opens and clicks by device on the day they happened (Omnisend statistics), rates — of all sends in the period. '
+    + `Omnisend data is available from ${fmt.date(s.dataFrom)}.`;
+}
+
+function exportOmnisendCsv() {
+  const columns = omColumns().map((c) => (c.type === 'text'
+    ? { title: c.title, type: 'text', value: c.get }
+    : { title: c.key === 'revenue' ? 'Revenue, MDL' : c.title, type: 'number', digits: ['openRate', 'clickRate', 'ctor'].includes(c.key) ? 4 : 2, value: c.get }));
+  download(buildCsv(columns, omRows()), `ff-ads-omnisend-push_${state.filters.from}_${state.filters.to}.csv`);
+}
+
+// ---------- Вкладка SMS / Viber (Data Edge) ----------
+
+const DE_HERO = ['de_delivered', 'de_delivery_rate', 'de_cost'];
+const DE_KPIS = ['de_mailings', 'de_clicks', 'de_ctr', 'de_cpc', 'de_read_rate'];
+const DE_LABELS = { sms: 'SMS', viber: 'Viber' };
+const DE_TABLE_ROWS = 1000;
+
+function deChannelCell(channel) {
+  const swatch = el('span', { class: 'swatch', 'aria-hidden': 'true' });
+  swatch.style.background = getComputedStyle(document.documentElement).getPropertyValue(channel === 'sms' ? '--accent' : '--dataedge').trim();
+  return el('span', { class: 'de-channel' }, swatch, DE_LABELS[channel]);
+}
+
+function deColumns() {
+  const num = (key, title, get, format) => ({ key, title, type: 'number', get, cell: (r) => el('td', { text: format(get(r)) }) });
+  const m = (key) => extraMetric(key);
+  return [
+    { key: 'date', title: 'Sent', type: 'text', get: (r) => r.date, cell: (r) => el('td', { text: fmt.date(r.date) }) },
+    { key: 'channel', title: 'Channel', type: 'text', get: (r) => r.channel, cell: (r) => el('td', { class: 'text' }, deChannelCell(r.channel)) },
+    { key: 'name', title: 'Mailing', type: 'text', get: (r) => r.name, cell: (r) => el('td', { class: 'text name', text: r.name, title: r.name }) },
+    num('sent', 'Sent', (r) => r.sent, fmt.int),
+    num('delivered', 'Delivered', (r) => r.delivered, fmt.int),
+    num('rate', 'Delivery rate', (r) => m('de_delivery_rate').calc(r), fmt.pct),
+    num('read', 'Read', (r) => r.read, fmt.int),
+    num('readRate', 'Read rate', (r) => (r.channel === 'viber' ? m('de_read_rate').calc(r) : null), fmt.pct),
+    num('clicks', 'Clicks', (r) => r.clicks, fmt.int),
+    num('ctr', 'CTR', (r) => m('de_ctr').calc(r), fmt.pct),
+    num('cpc', 'Cost per click', (r) => m('de_cpc').calc(r), fmt.money2),
+    num('cost', 'Cost, MDL', (r) => r.cost, fmt.money),
+    num('costNative', `Cost, ${state.dataedge?.currency ?? 'EUR'}`, (r) => r.costNative, (v) => fmt.currency(v, state.dataedge?.currency ?? 'EUR')),
+  ];
+}
+
+function deRows() {
+  const q = state.deSearch.trim().toLocaleLowerCase('ru');
+  const rows = (state.dataedge?.mailings ?? []).filter((r) => !q || r.name.toLocaleLowerCase('ru').includes(q));
+  const col = deColumns().find((c) => c.key === state.deSort.key) ?? deColumns()[0];
+  const dir = state.deSort.dir === 'asc' ? 1 : -1;
+  return rows.sort((a, b) => {
+    const va = col.get(a);
+    const vb = col.get(b);
+    if (va === null || va === undefined) return 1;
+    if (vb === null || vb === undefined) return -1;
+    if (col.type === 'text') return dir * String(va).localeCompare(String(vb), 'ru');
+    return dir * (va - vb);
+  });
+}
+
+function renderDeMailings() {
+  const columns = deColumns();
+  $('de-mailings').tHead.rows[0].replaceChildren(...columns.map((c) => el('th', {
+    scope: 'col',
+    class: `sortable${c.type === 'text' ? ' text' : ''}`,
+    'aria-sort': state.deSort.key === c.key ? (state.deSort.dir === 'asc' ? 'ascending' : 'descending') : 'none',
+  }, el('button', { type: 'button', dataset: { key: c.key }, text: c.title }))));
+  const rows = deRows();
+  const body = $('de-mailings').tBodies[0];
+  if (!rows.length) {
+    body.replaceChildren(el('tr', {}, el('td', { colspan: columns.length, class: 'text muted', text: 'No mailings in the selected period' })));
+  } else {
+    const frag = document.createDocumentFragment();
+    for (const r of rows.slice(0, DE_TABLE_ROWS)) frag.append(el('tr', {}, ...columns.map((c) => c.cell(r))));
+    body.replaceChildren(frag);
+  }
+  const total = state.dataedge?.mailings.length ?? 0;
+  $('de-mailings-count').textContent = rows.length === total ? `(${total})` : `(${rows.length} of ${total})`;
+}
+
+function renderDataEdgeCharts() {
+  const s = state.dataedge;
+  if (state.view !== 'dataedge' || !s?.available) return;
+  charts.deSent('chart-de-sent', s.series);
+}
+
+function renderDataEdge() {
+  const s = state.dataedge;
+  $('dataedge-section').hidden = false;
+  if (!s?.available) {
+    $('hero').replaceChildren(el('div', { class: 'hero-main' },
+      el('div', { class: 'hero-label', text: 'SMS / Viber' }),
+      el('div', { class: 'hero-sub', text: 'No Data Edge data yet — the Google Sheet (DATAEDGE_SHEET_ID) or the API key (DATAEDGE_TOKEN) is not set, or the first update has not run.' })));
+    $('kpis').replaceChildren();
+    $('dataedge-section').hidden = true;
+    return;
+  }
+  const d = deltaInfo('de_sent', s.current.sent, s.previous.sent);
+  $('hero').replaceChildren(
+    el('div', { class: 'hero-main' },
+      el('div', { class: 'hero-label', text: `Messages sent · ${fmt.date(s.period.from)} — ${fmt.date(s.period.to)}` }),
+      el('div', { class: 'hero-value', title: shopPrevTitle('de_sent', s.previous.sent) }, fmt.int(s.current.sent)),
+      el('div', { class: 'hero-sub' }, el('span', { class: 'delta', dataset: { tone: d.tone }, text: d.text }))),
+    el('div', { class: 'hero-kpis' }, ...DE_HERO.map((key) => shopKpi(key, s, 'hero-kpi'))));
+  const balance = s.balance
+    ? el('article', { class: 'kpi', title: `Data Edge balance at ${fmt.dateTime(s.balance.at)}` },
+      el('div', { class: 'label', text: 'Balance' }),
+      el('div', { class: 'value', text: fmt.currency(s.balance.sms, s.balance.currency) }),
+      el('div', { class: 'delta', text: s.balance.viber ? `Viber: ${fmt.currency(s.balance.viber, s.balance.currency)}` : `at ${fmt.dateTime(s.balance.at)}` }))
+    : null;
+  $('kpis').replaceChildren(...DE_KPIS.map((key) => shopKpi(key, s)), balance);
+  renderDataEdgeCharts();
+  const m = (key, x) => extraMetric(key).calc(x);
+  $('de-channels').tBodies[0].replaceChildren(...s.channels.map((c) => {
+    const cell = (key, fmtv) => {
+      const cur = m(key, c.current);
+      const info = deltaInfo(key, cur, m(key, c.previous));
+      return el('td', { title: info.text }, fmtv(cur), el('div', { class: 'muted small', dataset: { tone: info.tone }, text: info.short }));
+    };
+    return el('tr', {},
+      el('td', { class: 'text' }, deChannelCell(c.channel)),
+      cell('de_mailings', fmt.int), cell('de_sent', fmt.int), cell('de_delivered', fmt.int), cell('de_delivery_rate', fmt.pct),
+      c.channel === 'viber' ? cell('de_read', fmt.int) : el('td', { class: 'muted', text: fmt.DASH }),
+      c.channel === 'viber' ? cell('de_read_rate', fmt.pct) : el('td', { class: 'muted', text: fmt.DASH }),
+      cell('de_clicks', fmt.int), cell('de_ctr', fmt.pct),
+      cell('de_cost', fmt.money), cell('de_cpd', fmt.money2), cell('de_cpc', fmt.money2));
+  }));
+  renderDeMailings();
+  $('de-note').textContent = 'Data Edge campaigns sent from the account, by send date. '
+    + (s.sheet ? `Source — the account reports (Reports → SMS / Viber) exported to the Google Sheet, updated ${fmt.dateTime(s.sheet.at)}; ` : 'The Google Sheet with the account reports is not connected yet (DATAEDGE_SHEET_ID); ')
+    + 'only sent campaigns are counted (cancelled, unpaid, not confirmed and failed ones are skipped). Sent — numbers in the campaign; '
+    + 'SMS delivered — delivered SMS parts converted to messages. Clicks — link transitions from the report; CTR — clicks ÷ sent '
+    + '(campaigns without a link are not counted). Delivery rate — delivered ÷ sent; read rate (Viber only) — read ÷ delivered. '
+    + `Cost — in MDL at the NBM rate on the send date (account currency ${s.currency}). Balance — from the Data Edge API. `
+    + (s.dataFrom ? `Data is available from ${fmt.date(s.dataFrom)}${s.dataTo ? ` to ${fmt.date(s.dataTo)}` : ''}.` : '');
+}
+
+function exportDataEdgeCsv() {
+  const columns = deColumns().map((c) => ({ title: c.title, type: c.type, digits: ['rate', 'readRate', 'ctr'].includes(c.key) ? 4 : 2, value: c.get }));
+  download(buildCsv(columns, deRows()), `ff-ads-sms-viber_${state.filters.from}_${state.filters.to}.csv`);
+}
+
+// ---------- Вкладка App push (OneSignal) ----------
+
+const OS_HERO = ['os_received', 'os_clicks', 'os_ctr'];
+const OS_KPIS = ['os_messages', 'os_receive_rate', 'os_fail_rate'];
+const OS_KIND_LABELS = { campaign: 'campaigns sent from OneSignal', automated: 'automated messages', api: 'mailings sent through the API (one message per user, grouped by day and title)' };
+
+function osColumns() {
+  const m = (key) => extraMetric(key);
+  return [
+    { key: 'date', title: 'Sent', type: 'text', get: (r) => r.date, cell: (r) => el('td', { text: fmt.date(r.date) }) },
+    {
+      key: 'name', title: 'Message', type: 'text', get: (r) => r.name,
+      cell: (r) => {
+        const sub = [r.title !== r.name ? r.title : '', r.text].filter(Boolean).join(' — ');
+        return el('td', { class: 'text name' }, el('span', { class: 'place' },
+          el('span', { text: r.name }), sub ? el('span', { class: 'place-address', text: sub }) : ''));
+      },
+    },
+    mNum('recipients', 'Messages', (r) => r.recipients, (v) => (v === null || v === undefined ? fmt.DASH : fmt.int(v))),
+    mNum('sent', 'Sent', (r) => r.sent, fmt.int),
+    mNum('received', 'Confirmed', (r) => r.received, fmt.int),
+    mNum('clicks', 'Clicks', (r) => r.clicks, fmt.int),
+    mNum('ctr', 'CTR', (r) => m('os_ctr').calc(r), fmt.pct),
+    mNum('undelivered', 'Not delivered', (r) => r.undelivered, fmt.int),
+    mNum('iosSent', 'iOS sent', (r) => r.iosSent, fmt.int),
+    mNum('iosCtr', 'iOS CTR', (r) => m('os_ios_ctr').calc(r), fmt.pct),
+    mNum('androidSent', 'Android sent', (r) => r.androidSent, fmt.int),
+    mNum('androidCtr', 'Android CTR', (r) => m('os_android_ctr').calc(r), fmt.pct),
+  ];
+}
+function osRows() {
+  const q = state.osSearch.trim().toLocaleLowerCase('ro');
+  return (state.onesignal?.messages ?? []).filter((r) => !q || `${r.name} ${r.title} ${r.text}`.toLocaleLowerCase('ro').includes(q));
+}
+function renderOsMessages() {
+  const rows = osRows();
+  mapsTable('os-messages', osColumns(), rows, state.osSort, 'No messages in the selected period');
+  const total = state.onesignal?.messages.length ?? 0;
+  $('os-messages-count').textContent = rows.length === total ? `(${total})` : `(${rows.length} of ${total})`;
+}
+function renderOneSignalCharts() {
+  const s = state.onesignal;
+  if (state.view !== 'onesignal' || !s?.available) return;
+  charts.osSent('chart-os-daily', s.all.series);
+}
+
+const osJourneyColumns = () => {
+  const n = (v) => (v === null || v === undefined ? fmt.DASH : fmt.int(v));
+  const pct = (a, b) => (b ? a / b : null);
+  return [
+    mText('name', 'Journey', (r) => r.name, 'text name'),
+    mText('status', 'Status', (r) => r.status),
+    mNum('sent', 'Sent, total', (r) => r.total?.sent ?? null, n),
+    mNum('delivered', 'Delivered', (r) => r.total?.delivered ?? null, n),
+    mNum('clicks', 'Clicks', (r) => r.total?.clicks ?? null, n),
+    mNum('ctr', 'CTR', (r) => (r.total ? pct(r.total.clicks, r.total.delivered) : null), fmt.pct),
+    mNum('failed', 'Failed', (r) => r.total?.failed ?? null, n),
+    mNum('started', 'Entered', (r) => r.total?.started ?? null, n),
+    mNum('pSent', 'Sent in period', (r) => r.period?.sent ?? null, n),
+    mNum('pClicks', 'Clicks in period', (r) => r.period?.clicks ?? null, n),
+  ];
+};
+function renderOsJourneys() {
+  const rows = state.onesignal?.journeys ?? [];
+  mapsTable('os-journeys', osJourneyColumns(), rows, state.osJourneySort, 'No journeys yet — they are loaded once a day');
+  $('os-journeys-count').textContent = `(${rows.length})`;
+  // Нет сценариев Journeys — блок не показывается.
+  $('os-journeys').closest('.card').hidden = !rows.length;
+}
+function renderOneSignal() {
+  const s = state.onesignal;
+  $('onesignal-section').hidden = false;
+  if (!s?.available) {
+    $('hero').replaceChildren(el('div', { class: 'hero-main' },
+      el('div', { class: 'hero-label', text: 'App push' }),
+      el('div', { class: 'hero-sub', text: 'No OneSignal data yet — ONESIGNAL_APP_ID or the ONESIGNAL_API_KEY secret is not set, or the first update has not run.' })));
+    $('kpis').replaceChildren();
+    $('onesignal-section').hidden = true;
+    return;
+  }
+  // Главный блок и плитки — все пуши по дню отправки (рассылки через API, кампании); итоги за 30 дней — Outcomes OneSignal.
+  const o = { current: s.all.current, previous: s.all.previous };
+  const d = deltaInfo('os_sent', o.current.sent, o.previous.sent);
+  $('hero').replaceChildren(
+    el('div', { class: 'hero-main' },
+      el('div', { class: 'hero-label', text: `Push notifications sent · ${fmt.date(s.period.from)} — ${fmt.date(s.period.to)}` }),
+      el('div', { class: 'hero-value', title: shopPrevTitle('os_sent', o.previous.sent) }, fmt.int(o.current.sent)),
+      el('div', { class: 'hero-sub' }, el('span', { class: 'delta', dataset: { tone: d.tone }, text: d.text }))),
+    el('div', { class: 'hero-kpis' }, ...OS_HERO.map((key) => shopKpi(key, o, 'hero-kpi'))));
+  const m = s.outcomes.month;
+  const monthTile = (label, value, format) => el('article', { class: 'kpi', title: m ? `OneSignal, 30 days to ${fmt.date(m.day)}` : '' },
+    el('div', { class: 'label', text: label }), el('div', { class: 'value', text: m ? format(value) : fmt.DASH }),
+    el('div', { class: 'delta', text: m ? `30 days to ${fmt.date(m.day)}` : 'after the first update' }));
+  $('kpis').replaceChildren(...OS_KPIS.map((key) => shopKpi(key, o)),
+    monthTile('Confirmed, last 30 days', m?.confirmed, (v) => (v === null || v === undefined ? fmt.DASH : fmt.int(v))),
+    monthTile('Clicks, last 30 days', m?.clicks, (v) => (v === null || v === undefined ? fmt.DASH : fmt.int(v))),
+    monthTile('CTR, last 30 days', m && m.confirmed && m.clicks !== null ? m.clicks / m.confirmed : null, fmt.pct));
+  const api = s.kind === 'api';
+  renderOneSignalCharts();
+  renderOsJourneys();
+  $('os-platforms-card').hidden = false;
+  $('os-messages-block').hidden = false;
+  {
+    const c = s.current;
+    const pl = [['iOS', c.iosSent, c.iosClicks], ['Android', c.androidSent, c.androidClicks]];
+    const total = c.iosSent + c.androidSent;
+    $('os-platforms').tBodies[0].replaceChildren(...pl.map(([name, sent, clicks]) => el('tr', {},
+      el('td', { class: 'text', text: name }), el('td', { text: fmt.int(sent) }), el('td', { text: total ? fmt.pct(sent / total) : fmt.DASH }),
+      el('td', { text: fmt.int(clicks) }), el('td', { text: sent ? fmt.pct(clicks / sent) : fmt.DASH }))));
+    renderOsMessages();
+  }
+  $('os-note').textContent = 'OneSignal, FF app. All push (top) — all messages by send date: mailings sent through the API '
+    + '(read after 3 days, so the last 3 days appear later) and campaigns; sent — accepted by Apple / Google, confirmed — delivery '
+    + 'confirmed by the app, clicks — the push was opened, CTR — clicks ÷ sent. The last-30-days tiles are OneSignal Outcomes totals '
+    + '(clicks are counted by click date, so they differ slightly from the totals by send date). '
+    + 'Journeys — totals since the journey started; "in period" is computed from daily snapshots. '
+    + `Messages (below) — ${OS_KIND_LABELS[s.kind]} by send date; messages sent by Journeys are not included here (OneSignal API). `
+    + 'Sent — accepted by Apple / Google push servers; confirmed — delivery confirmed by the app on the device; clicks — the push was opened; '
+    + 'CTR — clicks ÷ sent. Statistics of messages from the last 14 days are refreshed on every update (clicks keep coming for a few days). '
+    + (api ? 'Mailings through the API: OneSignal stores one message per user and keeps them for 30 days — the dashboard reads them in order, '
+      + 'only after 3 days (clicks keep coming), and sums them by day and title; mailings of the last 3 days appear later. ' : '')
+    + (!s.historyDone ? 'Older messages are still loading — they will appear after the next updates. ' : '')
+    + (s.dataFrom ? `Data is available from ${fmt.date(s.dataFrom)}.` : '');
+}
+function exportOneSignalCsv() {
+  const columns = osColumns().map((c) => ({ title: c.title, type: c.type, digits: c.key.toLowerCase().includes('ctr') ? 4 : 2, value: c.get }));
+  download(buildCsv(columns, mapsSorted(osRows(), osColumns(), state.osSort)), `ff-ads-app-push_${state.filters.from}_${state.filters.to}.csv`);
+}
+
+// ---------- Вкладка Google Maps (Google Business Profile) ----------
+
+const MAPS_HERO = ['gbp_website', 'gbp_calls', 'gbp_directions'];
+const MAPS_KPIS = ['gbp_locations', 'gbp_rating', 'gbp_reviews_total', 'gbp_new_reviews', 'gbp_reply_rate', 'gbp_action_rate'];
+const MAPS_BRANDS = { FF: 'FF', DITA: 'DITA', OPTICA: 'Optica' };
+const MAPS_TABLE_ROWS = 1000;
+const starText = (n) => (n ? '★'.repeat(n) + '☆'.repeat(5 - n) : fmt.DASH);
+
+// Сортируемая таблица: колонки { key, title, type, get, cell }; sort — { key, dir } из state.mapsSort.
+function mapsSorted(rows, columns, sort) {
+  const col = columns.find((c) => c.key === sort.key) ?? columns[0];
+  const dir = sort.dir === 'asc' ? 1 : -1;
+  return [...rows].sort((a, b) => {
+    const va = col.get(a);
+    const vb = col.get(b);
+    if (va === null || va === undefined) return 1;
+    if (vb === null || vb === undefined) return -1;
+    if (col.type === 'text') return dir * String(va).localeCompare(String(vb), 'ro');
+    return dir * (va - vb);
+  });
+}
+function mapsTable(id, columns, rows, sort, emptyText) {
+  $(id).tHead.rows[0].replaceChildren(...columns.map((c) => el('th', {
+    scope: 'col',
+    class: `sortable${c.type === 'text' ? ' text' : ''}`,
+    'aria-sort': sort.key === c.key ? (sort.dir === 'asc' ? 'ascending' : 'descending') : 'none',
+  }, el('button', { type: 'button', dataset: { key: c.key }, text: c.title }))));
+  const body = $(id).tBodies[0];
+  if (!rows.length) {
+    body.replaceChildren(el('tr', {}, el('td', { colspan: columns.length, class: 'text muted', text: emptyText })));
+    return;
+  }
+  const frag = document.createDocumentFragment();
+  for (const r of mapsSorted(rows, columns, sort).slice(0, MAPS_TABLE_ROWS)) frag.append(el('tr', {}, ...columns.map((c) => c.cell(r))));
+  body.replaceChildren(frag);
+}
+// Аптека: название (ссылка на карту) и адрес под ним — у сети много одноимённых профилей.
+const mapsPlace = (title, address, uri) => el('span', { class: 'place' },
+  uri ? el('a', { href: uri, target: '_blank', rel: 'noopener noreferrer', text: title }) : el('span', { text: title }),
+  address ? el('span', { class: 'place-address', text: address }) : '');
+const mNum = (key, title, get, format) => ({ key, title, type: 'number', get, cell: (r) => el('td', { text: format(get(r)) }) });
+const mText = (key, title, get, cls = 'text') => ({ key, title, type: 'text', get, cell: (r) => el('td', { class: cls, text: get(r) || fmt.DASH, title: get(r) || '' }) });
+
+function mapsLocationColumns() {
+  const m = (key) => extraMetric(key);
+  return [
+    {
+      key: 'title', title: 'Pharmacy', type: 'text', get: (r) => r.title,
+      cell: (r) => el('td', { class: 'text name' }, mapsPlace(r.title, r.address, r.mapsUri),
+        r.status !== 'OPEN' ? el('div', { class: 'muted small', text: r.status === 'CLOSED_TEMPORARILY' ? 'temporarily closed' : 'closed' }) : ''),
+    },
+    mText('city', 'City', (r) => r.city),
+    mText('brand', 'Brand', (r) => MAPS_BRANDS[r.brand] ?? r.brand),
+    mNum('impressions', 'Views', (r) => r.impressions, fmt.int),
+    mNum('website', 'Website', (r) => r.website, fmt.int),
+    mNum('calls', 'Calls', (r) => r.calls, fmt.int),
+    mNum('directions', 'Directions', (r) => r.directions, fmt.int),
+    mNum('actions', 'Actions', (r) => r.actions, fmt.int),
+    mNum('change', 'Actions vs prev.', (r) => (r.previousActions ? (r.actions - r.previousActions) / r.previousActions : null), (v) => (v === null ? fmt.DASH : fmt.signedPct(v))),
+    mNum('rate', 'Action rate', (r) => m('gbp_action_rate').calc(r), fmt.pct),
+    mNum('rating', 'Rating', (r) => r.rating, (v) => m('gbp_rating').format(v)),
+    mNum('total', 'Reviews', (r) => r.total, fmt.int),
+    mNum('newReviews', 'New reviews', (r) => r.newReviews, fmt.int),
+    mNum('newStars', 'New rating', (r) => m('gbp_new_stars').calc(r), (v) => m('gbp_new_stars').format(v)),
+    mNum('posts', 'Posts', (r) => r.posts, fmt.int),
+  ];
+}
+function mapsLocationRows() {
+  const q = state.mapsSearch.trim().toLocaleLowerCase('ro');
+  return (state.maps?.locations ?? []).filter((r) => !q || `${r.title} ${r.city} ${r.address}`.toLocaleLowerCase('ro').includes(q));
+}
+function renderMapsLocations() {
+  const rows = mapsLocationRows();
+  mapsTable('maps-locations', mapsLocationColumns(), rows, state.mapsSort.locations, 'No pharmacies');
+  const total = state.maps?.locations.length ?? 0;
+  $('maps-locations-count').textContent = rows.length === total ? `(${total})` : `(${rows.length} of ${total})`;
+}
+
+function mapsReviewColumns() {
+  return [
+    { key: 'date', title: 'Date', type: 'text', get: (r) => r.date, cell: (r) => el('td', { text: fmt.date(r.date) }) },
+    { key: 'stars', title: 'Stars', type: 'number', get: (r) => r.stars, cell: (r) => el('td', { class: 'stars', text: starText(r.stars), title: `${r.stars} of 5` }) },
+    { key: 'location', title: 'Pharmacy', type: 'text', get: (r) => `${r.location} ${r.address}`, cell: (r) => el('td', { class: 'text name' }, mapsPlace(r.location, r.address, r.mapsUri)) },
+    mText('city', 'City', (r) => r.city),
+    { key: 'text', title: 'Review', type: 'text', get: (r) => r.text, cell: (r) => el('td', { class: 'text review-text', text: r.text || '(no text)' }) },
+    { key: 'replied', title: 'Reply', type: 'number', get: (r) => (r.replied ? 1 : 0), cell: (r) => el('td', { class: r.replied ? '' : 'muted', text: r.replied ? 'Yes' : 'No' }) },
+  ];
+}
+function mapsReviewRows() {
+  const f = $('maps-review-filter').value;
+  return (state.maps?.reviews ?? []).filter((r) => (!f.includes('low') || (r.stars && r.stars <= 3)) && (!f.includes('unanswered') || !r.replied));
+}
+function renderMapsReviews() {
+  const rows = mapsReviewRows();
+  mapsTable('maps-reviews', mapsReviewColumns(), rows, state.mapsSort.reviews, 'No reviews in the selected period');
+  const total = state.maps?.reviews.length ?? 0;
+  $('maps-reviews-count').textContent = rows.length === total ? `(${total})` : `(${rows.length} of ${total})`;
+}
+const mapsKeywordColumns = () => [mText('keyword', 'Search term', (r) => r.keyword, 'text name'), mNum('impressions', 'Views', (r) => r.impressions, fmt.int)];
+const mapsPostColumns = () => [
+  { key: 'date', title: 'Date', type: 'text', get: (r) => r.date, cell: (r) => el('td', { text: fmt.date(r.date) }) },
+  {
+    key: 'places', title: 'Pharmacies', type: 'number', get: (r) => r.places.length,
+    cell: (r) => el('td', { class: 'text name', title: r.places.map((p) => [p.location, p.address].filter(Boolean).join(', ')).join('\n') },
+      r.places.length === 1 ? mapsPlace(r.places[0].location, r.places[0].address, r.places[0].mapsUri) : `${fmt.int(r.places.length)} pharmacies`),
+  },
+  {
+    key: 'summary', title: 'Post', type: 'text', get: (r) => r.summary,
+    cell: (r) => el('td', { class: 'text review-text' }, r.url ? el('a', { href: r.url, target: '_blank', rel: 'noopener noreferrer', text: r.summary || '(no text)' }) : (r.summary || '(no text)')),
+  },
+];
+const MAPS_TABLES = {
+  locations: [mapsLocationColumns, renderMapsLocations],
+  reviews: [mapsReviewColumns, renderMapsReviews],
+  keywords: [mapsKeywordColumns, () => mapsTable('maps-keywords', mapsKeywordColumns(), state.maps?.keywords.rows ?? [], state.mapsSort.keywords, 'No search terms for the months of the period yet')],
+  posts: [mapsPostColumns, () => mapsTable('maps-posts', mapsPostColumns(), state.maps?.posts ?? [], state.mapsSort.posts, 'No posts in the selected period')],
+};
+
+function renderMapsCharts() {
+  const s = state.maps;
+  if (state.view !== 'maps' || !s?.available) return;
+  charts.mapsActions('chart-maps-actions', s.series);
+}
+
+function renderMaps() {
+  const s = state.maps;
+  $('maps-section').hidden = false;
+  if (!s?.available) {
+    $('hero').replaceChildren(el('div', { class: 'hero-main' },
+      el('div', { class: 'hero-label', text: 'Google Maps' }),
+      el('div', { class: 'hero-sub', text: 'No Google Business Profile data yet — the GBP_OAUTH_JSON secret is not set or the first update has not run.' })));
+    $('kpis').replaceChildren();
+    $('maps-section').hidden = true;
+    return;
+  }
+  const d = deltaInfo('gbp_impressions', s.current.impressions, s.previous.impressions);
+  const cut = s.period.requestedTo !== s.period.to ? ` (data to ${fmt.date(s.period.to)})` : '';
+  $('hero').replaceChildren(
+    el('div', { class: 'hero-main' },
+      el('div', { class: 'hero-label', text: `Views on Google Maps and Search · ${fmt.date(s.period.from)} — ${fmt.date(s.period.to)}${cut}` }),
+      el('div', { class: 'hero-value', title: shopPrevTitle('gbp_impressions', s.previous.impressions) }, fmt.int(s.current.impressions)),
+      el('div', { class: 'hero-sub' }, el('span', { class: 'delta', dataset: { tone: d.tone }, text: d.text }))),
+    el('div', { class: 'hero-kpis' }, ...MAPS_HERO.map((key) => shopKpi(key, s, 'hero-kpi'))));
+  $('kpis').replaceChildren(...MAPS_KPIS.map((key) => shopKpi(key, s)));
+  renderMapsCharts();
+  const c = s.current;
+  const views = [['Google Maps', c.mapsMobile, c.mapsDesktop], ['Google Search', c.searchMobile, c.searchDesktop]];
+  $('maps-views').tBodies[0].replaceChildren(...views.map(([name, mob, desk]) => el('tr', {},
+    el('td', { class: 'text', text: name }), el('td', { text: fmt.int(mob) }), el('td', { text: fmt.int(desk) }),
+    el('td', { text: fmt.int(mob + desk) }), el('td', { text: c.impressions ? fmt.pct((mob + desk) / c.impressions) : fmt.DASH }))));
+  for (const [, render] of Object.values(MAPS_TABLES)) render();
+  $('maps-keywords-months').textContent = s.keywords.months.length
+    ? `(${s.keywords.months.length === 1 ? s.keywords.months[0] : `${s.keywords.months[0]} — ${s.keywords.months.at(-1)}`}${s.keywords.latest ? ', latest full month' : ''})` : '';
+  $('maps-posts-count').textContent = `(${s.posts.length})`;
+  $('maps-note').textContent = `Google Business Profile, ${s.locations.length} pharmacy profiles${s.brand ? ` (${MAPS_BRANDS[s.brand]})` : ''}; updated once a day (last: ${fmt.date(s.syncedDay)}). `
+    + 'Views — unique users per day who saw the profile on Google Maps or in Search. Calls — taps on the "Call" button (not completed calls); '
+    + 'website — clicks on the website link; directions — direction requests. Google finalises the last 2–3 days later, so the period ends on the last day with data. '
+    + 'Rating and total reviews — current values from Google (the comparison uses the snapshot at the end of the previous period, available from the first update). '
+    + 'New reviews and reply rate — by publication date. Search terms — monthly, by unique users (rare terms Google hides are not counted). '
+    + 'Post statistics are no longer available in the Google API — only the list of posts. '
+    + `Data is available from ${fmt.date(s.dataFrom)}.`;
+}
+
+function exportMapsCsv() {
+  const columns = mapsLocationColumns().map((c) => ({ title: c.title, type: c.type, digits: ['rate', 'change'].includes(c.key) ? 4 : 2, value: c.get }));
+  download(buildCsv(columns, mapsSorted(mapsLocationRows(), mapsLocationColumns(), state.mapsSort.locations)), `ff-ads-google-maps_${state.filters.from}_${state.filters.to}.csv`);
+}
+
+// ---------- Ahrefs (на вкладке SEO) ----------
+
+const AH_RANK_KPIS = ['ah_avg_pos', 'ah_top3', 'ah_top10', 'ah_sov', 'ah_ai'];
+const AH_SITE_KPIS = ['ah_dr', 'ah_refdomains', 'ah_traffic', 'ah_keywords'];
+const AH_TABLE_ROWS = 1000;
+
+function ahKpi(key, cur, prev, title) {
+  const m = extraMetric(key);
+  const c = cur ? m.calc(cur) : null;
+  const p = prev ? m.calc(prev) : null;
+  const info = deltaInfo(key, c, p);
+  return el('article', { class: 'kpi', title, dataset: { metric: key } },
+    el('div', { class: 'label', text: m.label }),
+    el('div', { class: 'value', text: m.format(c) }),
+    el('div', { class: 'delta', dataset: { tone: info.tone }, text: info.short === fmt.DASH ? 'no data to compare' : `${info.short} ${title.split(':')[0]}` }));
+}
+
+// Изменение позиции слова: положительное — выросло (номер позиции уменьшился); выпало / появилось.
+function ahChange(r) {
+  if (r.position === null && r.previous === null) return null;
+  if (r.position === null) return -1000;
+  if (r.previous === null) return 1000;
+  return r.previous - r.position;
+}
+
+function ahColumns() {
+  const num = (key, title, get, format) => ({ key, title, type: 'number', get, cell: (r) => el('td', { text: format(get(r)) }) });
+  return [
+    {
+      key: 'keyword', title: 'Keyword', type: 'text', get: (r) => r.keyword,
+      cell: (r) => el('td', { class: 'text', title: r.keyword }, r.keyword, r.branded ? el('span', { class: 'gsc-tag', text: 'brand' }) : null),
+    },
+    num('position', 'Position', (r) => r.position, (v) => (v === null ? 'not ranking' : fmt.int(v))),
+    {
+      key: 'change', title: 'Change (30 days)', type: 'number', get: ahChange,
+      cell: (r) => {
+        const d = ahChange(r);
+        if (d === null) return el('td', { class: 'muted', text: fmt.DASH });
+        if (d === 1000) return el('td', { dataset: { tone: 'good' }, text: 'new' });
+        if (d === -1000) return el('td', { dataset: { tone: 'bad' }, text: 'lost' });
+        return el('td', { dataset: { tone: d > 0 ? 'good' : d < 0 ? 'bad' : 'neutral' }, text: d > 0 ? `▲ ${d}` : d < 0 ? `▼ ${-d}` : '0' });
+      },
+    },
+    num('volume', 'Volume', (r) => r.volume, fmt.int),
+    num('traffic', 'Traffic', (r) => r.traffic, fmt.int),
+    { key: 'url', title: 'Page', type: 'text', get: (r) => r.url, cell: (r) => el('td', { class: 'text url', title: r.url, text: r.url ? r.url.replace(/^https?:\/\/[^/]+/, '') || '/' : fmt.DASH }) },
+  ];
+}
+
+function ahRows() {
+  const rows = state.ahrefs?.keywords?.rows ?? [];
+  const q = state.ahSearch.trim().toLocaleLowerCase('ru');
+  const filter = $('ah-filter').value;
+  const ok = (r) => {
+    const d = ahChange(r);
+    if (filter === 'up') return d !== null && d > 0;
+    if (filter === 'down') return d !== null && d < 0;
+    if (filter === 'top10') return r.position !== null && r.position <= 10;
+    if (filter === 'lost') return r.position === null;
+    if (filter === 'brand') return r.branded;
+    if (filter === 'nonbrand') return !r.branded;
+    return true;
+  };
+  const col = ahColumns().find((c) => c.key === state.ahSort.key) ?? ahColumns()[4];
+  const dir = state.ahSort.dir === 'asc' ? 1 : -1;
+  return rows.filter((r) => ok(r) && (!q || `${r.keyword} ${r.url}`.toLocaleLowerCase('ru').includes(q))).sort((a, b) => {
+    const va = col.get(a);
+    const vb = col.get(b);
+    if (va === null || va === undefined) return 1;
+    if (vb === null || vb === undefined) return -1;
+    if (col.type === 'text') return dir * String(va).localeCompare(String(vb), 'ru');
+    return dir * (va - vb);
+  });
+}
+
+function renderAhKeywords() {
+  const columns = ahColumns();
+  $('ah-keywords').tHead.rows[0].replaceChildren(...columns.map((c) => el('th', {
+    scope: 'col', class: `sortable${c.type === 'text' ? ' text' : ''}`,
+    'aria-sort': state.ahSort.key === c.key ? (state.ahSort.dir === 'asc' ? 'ascending' : 'descending') : 'none',
+  }, el('button', { type: 'button', dataset: { key: c.key }, text: c.title }))));
+  const rows = ahRows();
+  const body = $('ah-keywords').tBodies[0];
+  if (!rows.length) {
+    body.replaceChildren(el('tr', {}, el('td', { colspan: columns.length, class: 'text muted', text: 'No keywords' })));
+  } else {
+    const frag = document.createDocumentFragment();
+    for (const r of rows.slice(0, AH_TABLE_ROWS)) frag.append(el('tr', {}, ...columns.map((c) => c.cell(r))));
+    body.replaceChildren(frag);
+  }
+  const total = state.ahrefs?.keywords?.rows.length ?? 0;
+  const shown = Math.min(rows.length, AH_TABLE_ROWS);
+  $('ah-keywords-count').textContent = rows.length === total ? `(${fmt.int(total)})` : `(${fmt.int(shown)} of ${fmt.int(rows.length)} matching, ${fmt.int(total)} total)`;
+}
+
+function renderAhrefsCharts() {
+  const a = state.ahrefs;
+  if (state.view !== 'seo' || !a?.available) return;
+  charts.ahPositions('chart-ah-positions', a.rank.series);
+  const rows = a.monthly.rows.slice(-24);
+  charts.ahMonthly('chart-ah-traffic', rows.map((r) => ({ ...r, keywords: (r.top3 ?? 0) + (r.top4_10 ?? 0) + (r.top11 ?? 0) })),
+    ['traffic', 'Organic traffic (est.)', '--gsc-clicks'], ['keywords', 'Ranking keywords', '--gsc-position']);
+  charts.ahMonthly('chart-ah-links', rows, ['refdomains', 'Referring domains', '--gsc-impressions'], ['dr', 'Domain Rating', '--gsc-ctr']);
+}
+
+function renderAhrefs() {
+  const a = state.ahrefs;
+  $('ahrefs-block').hidden = !a?.available;
+  if (!a?.available) return;
+  const r = a.rank;
+  const dayTitle = (d) => (d ? fmt.date(d) : '—');
+  $('ah-rank-kpis').replaceChildren(...AH_RANK_KPIS.map((key) => ahKpi(key, r.current, r.previous,
+    `vs ${dayTitle(r.prevDay)}: rankings on ${dayTitle(r.day)} (${a.device}) against ${dayTitle(r.prevDay)}`)));
+  const mc = a.monthly.current;
+  const mp = a.monthly.previous;
+  $('ah-site-kpis').replaceChildren(...AH_SITE_KPIS.map((key) => ahKpi(key, mc, mp,
+    `vs ${mp ? fmt.monthName(mp.month) : '—'}: ${mc ? fmt.monthName(mc.month) : '—'} against ${mp ? fmt.monthName(mp.month) : '—'}`)));
+  const m = (key, x) => (x ? extraMetric(key).calc(x) : null);
+  const compRow = (name, cur, prev, own) => {
+    const cell = (key) => {
+      const info = deltaInfo(key, m(key, cur), m(key, prev));
+      return el('td', { title: info.text }, extraMetric(key).format(m(key, cur)),
+        el('div', { class: 'muted small', dataset: { tone: info.tone }, text: info.short }));
+    };
+    return el('tr', { class: own ? 'own' : null }, el('td', { class: 'text', text: name }),
+      cell('ah_sov'), cell('ah_avg_pos'), cell('ah_top3'), cell('ah_top10'), el('td', { text: fmt.int(cur?.traffic) }));
+  };
+  const comps = [...r.competitors].sort((x, y) => (y.current?.sov ?? 0) - (x.current?.sov ?? 0));
+  $('ah-competitors').tBodies[0].replaceChildren(compRow(a.target, r.current, r.previous, true), ...comps.map((c) => compRow(c.name, c.current, c.previous, false)));
+  renderAhrefsCharts();
+  renderAhKeywords();
+  const pages = a.pages?.rows ?? [];
+  $('ah-pages-date').textContent = a.pages ? `(${fmt.date(a.pages.date)})` : '';
+  $('ah-pages').tBodies[0].replaceChildren(...pages.map((p) => {
+    const d = delta(p.traffic, p.previous);
+    return el('tr', {},
+      el('td', { class: 'text url', title: p.url, text: p.url.replace(/^https?:\/\/[^/]+/, '') || '/' }),
+      el('td', { text: fmt.int(p.traffic) }),
+      el('td', { dataset: { tone: d === null ? 'neutral' : d > 0 ? 'good' : d < 0 ? 'bad' : 'neutral' }, text: d === null ? fmt.DASH : fmt.signedPct(d) }),
+      el('td', { text: fmt.int(p.keywords) }),
+      el('td', { class: 'text', text: p.topKeyword || fmt.DASH }));
+  }));
+  $('ah-note').textContent = `Ahrefs, ${a.target}. Rankings — Rank Tracker project (${fmt.int(a.keywords?.rows.length ?? 0)} tracked keywords, ${a.device}): `
+    + `values on the last day of the period with data (${dayTitle(r.day)}) against the last day of the comparison period (${dayTitle(r.prevDay)}). `
+    + 'Share of voice — the share of estimated organic traffic for the tracked keywords that goes to the site; competitors — as set in the Rank Tracker project. '
+    + `Tracked keywords and position change — the latest snapshot (${a.keywords ? fmt.date(a.keywords.date) : '—'}) against 30 days earlier. `
+    + 'Site strength (Domain Rating, referring domains, organic traffic and ranking keywords) — Ahrefs estimates by month: the month of the end of the period against the previous month. '
+    + 'Ahrefs traffic is a model estimate, not real visits — for real clicks see Search Console above. Data updates once a day; top pages — once a week.';
+}
+
+function exportAhrefsCsv() {
+  const columns = ahColumns().map((c) => ({ title: c.title, type: c.type, digits: 0, value: c.key === 'change' ? (r) => {
+    const d = ahChange(r);
+    return d === 1000 || d === -1000 ? null : d;
+  } : c.get }));
+  download(buildCsv(columns, ahRows()), `ff-ads-ahrefs-keywords-${state.ahrefs?.device ?? 'mobile'}_${state.ahrefs?.keywords?.date ?? ''}.csv`);
+}
+
+// ---------- Вкладка SEO (Google Search Console) ----------
+
+// Плитки как в отчёте «Эффективность» Search Console: включают линии на графике (кроме «Запросов»).
+const GSC_TILES = [
+  ['gsc_clicks', '--gsc-clicks'], ['gsc_impressions', '--gsc-impressions'], ['gsc_ctr', '--gsc-ctr'],
+  ['gsc_position', '--gsc-position'], ['gsc_queries', null],
+];
+const GSC_DEVICE_LABELS = { MOBILE: 'Mobile', DESKTOP: 'Desktop', TABLET: 'Tablet' };
+const GSC_TABLE_ROWS = 500;
+// Страны Search Console — ISO 3166-1 alpha-3; названия — для частых, остальные кодом.
+const GSC_COUNTRIES = {
+  mda: 'Moldova', rou: 'Romania', rus: 'Russia', ukr: 'Ukraine', deu: 'Germany', ita: 'Italy', fra: 'France', gbr: 'United Kingdom',
+  usa: 'United States', esp: 'Spain', isr: 'Israel', tur: 'Turkey', pol: 'Poland', bel: 'Belgium', nld: 'Netherlands', prt: 'Portugal',
+  irl: 'Ireland', cze: 'Czechia', aut: 'Austria', che: 'Switzerland', can: 'Canada', blr: 'Belarus', kaz: 'Kazakhstan', bgr: 'Bulgaria',
+  grc: 'Greece', hun: 'Hungary', swe: 'Sweden', dnk: 'Denmark', nor: 'Norway', fin: 'Finland', geo: 'Georgia', arm: 'Armenia', aze: 'Azerbaijan',
+  zzz: 'Unknown region',
+};
+const gscCountry = (code) => GSC_COUNTRIES[code] ?? code.toUpperCase();
+const gscPos = (s) => (s && s.impressions > 0 ? s.pos / s.impressions : null);
+const gscCtr = (s) => (s && s.impressions > 0 ? s.clicks / s.impressions : null);
+
+function gscBrandTest() {
+  try {
+    return new RegExp(state.gsc?.brandRegex ?? '$^', 'iu');
+  } catch {
+    return /$^/;
+  }
+}
+
+function gscTile([key, token], s) {
+  const cur = shopifyValue(key, s.current);
+  const prev = shopifyValue(key, s.previous);
+  const info = deltaInfo(key, cur, prev);
+  const on = token ? state.gscMetrics.includes(key) : false;
+  const title = key === 'gsc_queries'
+    ? 'Unique queries with impressions — average per calendar month of the period (Search Console shows queries per month)'
+    : shopPrevTitle(key, prev);
+  const tile = el('button', { type: 'button', class: 'gsc-tile', 'aria-pressed': token ? String(on) : false, disabled: !token, title, dataset: { key, metric: key } },
+    el('span', { class: 'label' }, token ? el('span', { class: 'box', 'aria-hidden': 'true' }) : null, extraMetric(key).label),
+    el('span', { class: 'value', text: extraMetric(key).format(cur) }),
+    el('span', { class: 'delta', dataset: { tone: info.tone }, text: info.text }));
+  // Цвет — через CSSOM (атрибут style запрещён политикой CSP).
+  if (token) tile.style.setProperty('--c', `var(${token})`);
+  return tile;
+}
+
+function gscSplitItem(name, swatchColor, big, sub, d) {
+  const swatch = el('span', { class: 'swatch', 'aria-hidden': 'true' });
+  swatch.style.background = swatchColor;
+  return el('div', { class: 'item' },
+    el('span', { class: 'name' }, swatch, name),
+    el('span', { class: 'big', text: big }),
+    el('span', { class: 'sub', text: sub }),
+    d ? el('span', { class: 'sub', dataset: { tone: d.tone }, text: d.text }) : null);
+}
+
+function renderSeoCharts() {
+  const s = state.gsc;
+  if (state.view !== 'seo' || !s?.available) return;
+  charts.gscPerformance('chart-gsc', s.series, GSC_TILES.filter(([k, t]) => t && state.gscMetrics.includes(k)));
+  charts.shares('chart-gsc-devices', 'gsc_impressions', s.devices.map((d) => ({ label: GSC_DEVICE_LABELS[d.type], value: d.current.impressions })));
+  charts.gscBrand('chart-gsc-brand', s.series);
+}
+
+function gscColumns(dim) {
+  const name = {
+    query: { title: 'Query', get: (r) => r.key },
+    page: { title: 'Page', get: (r) => r.key.replace(/^https?:\/\/[^/]+/, '') || '/' },
+    country: { title: 'Country', get: (r) => gscCountry(r.key) },
+  }[dim];
+  const num = (key, title, get, format) => ({ key, title, type: 'number', get, cell: (r) => el('td', { text: format(get(r)) }) });
+  const brand = gscBrandTest();
+  return [
+    {
+      key: 'key', title: name.title, type: 'text', get: name.get,
+      cell: (r) => el('td', { class: 'text', title: r.key },
+        name.get(r), dim === 'query' && brand.test(r.key) ? el('span', { class: 'gsc-tag', text: 'brand' }) : null),
+    },
+    num('clicks', 'Clicks', (r) => r.current.clicks, fmt.int),
+    num('impressions', 'Impressions', (r) => r.current.impressions, fmt.int),
+    num('ctr', 'CTR', (r) => gscCtr(r.current), fmt.pct),
+    num('position', 'Position', (r) => gscPos(r.current), extraMetric('gsc_position').format),
+    {
+      key: 'change', title: 'Position change', type: 'number', get: (r) => {
+        const a = gscPos(r.current);
+        const b = gscPos(r.previous);
+        return a === null || b === null ? null : b - a;
+      },
+      cell: (r) => {
+        const a = gscPos(r.current);
+        const b = gscPos(r.previous);
+        if (a === null || b === null) return el('td', { class: 'muted', text: r.previous ? fmt.DASH : 'new' });
+        const d = Math.round((b - a) * 10) / 10;
+        return el('td', { dataset: { tone: d > 0 ? 'good' : d < 0 ? 'bad' : 'neutral' }, text: d > 0 ? `▲ ${fmt.num(d)}` : d < 0 ? `▼ ${fmt.num(-d)}` : '0' });
+      },
+    },
+  ];
+}
+
+function gscRows(dim) {
+  const t = state.gsc?.tables?.[dim];
+  if (!t) return [];
+  let rows = t.rows;
+  if (dim === 'query') {
+    const q = state.gscSearch.trim().toLocaleLowerCase('ru');
+    const type = $('gsc-query-type').value;
+    const brand = gscBrandTest();
+    rows = rows.filter((r) => (!q || r.key.toLocaleLowerCase('ru').includes(q))
+      && (type === 'all' || (type === 'brand') === brand.test(r.key)));
+  }
+  const sort = state.gscSort[dim];
+  const col = gscColumns(dim).find((c) => c.key === sort.key) ?? gscColumns(dim)[2];
+  const dir = sort.dir === 'asc' ? 1 : -1;
+  return [...rows].sort((a, b) => {
+    const va = col.get(a);
+    const vb = col.get(b);
+    if (va === null || va === undefined) return 1;
+    if (vb === null || vb === undefined) return -1;
+    if (col.type === 'text') return dir * String(va).localeCompare(String(vb), 'ru');
+    return dir * (va - vb);
+  });
+}
+
+function renderGscTable(dim, tableId, countId) {
+  const columns = gscColumns(dim);
+  const sort = state.gscSort[dim];
+  $(tableId).tHead.rows[0].replaceChildren(...columns.map((c) => el('th', {
+    scope: 'col',
+    class: `sortable${c.type === 'text' ? ' text' : ''}`,
+    'aria-sort': sort.key === c.key ? (sort.dir === 'asc' ? 'ascending' : 'descending') : 'none',
+  }, el('button', { type: 'button', dataset: { key: c.key }, text: c.title }))));
+  const rows = gscRows(dim);
+  const body = $(tableId).tBodies[0];
+  if (!rows.length) {
+    body.replaceChildren(el('tr', {}, el('td', { colspan: columns.length, class: 'text muted', text: 'No data for the selected period' })));
+  } else {
+    const frag = document.createDocumentFragment();
+    for (const r of rows.slice(0, GSC_TABLE_ROWS)) frag.append(el('tr', {}, ...columns.map((c) => c.cell(r))));
+    body.replaceChildren(frag);
+  }
+  if (countId) {
+    const n = state.gsc.tables[dim].n;
+    const shown = Math.min(rows.length, GSC_TABLE_ROWS);
+    $(countId).textContent = `(${fmt.int(shown)}${n ? ` of ~${fmt.int(n)} per month` : ''})`;
+  }
+}
+
+function renderSeo() {
+  const s = state.gsc;
+  $('seo-section').hidden = false;
+  renderAhrefs();
+  if (!s?.available) {
+    $('gsc-tiles').replaceChildren(el('p', { class: 'muted', text: 'No Search Console data yet — the site is not set (GSC_SITE_URL) or the first update has not run.' }));
+    return;
+  }
+  $('gsc-tiles').replaceChildren(...GSC_TILES.map((t) => gscTile(t, s)));
+  // Устройства: показы и клики, доля показов; как «Platform performance» в Looker.
+  const totalImpr = s.current.impressions;
+  $('gsc-devices').replaceChildren(...s.devices.map((d, i) => gscSplitItem(
+    GSC_DEVICE_LABELS[d.type], charts.omCampaignColor(i), `${fmt.int(d.current.clicks)} clicks`,
+    `${fmt.pct(totalImpr > 0 ? d.current.impressions / totalImpr : null, 1)} of impressions · position ${extraMetric('gsc_position').format(gscPos(d.current))}`,
+    deltaInfo('gsc_clicks', d.current.clicks, d.previous.clicks))));
+  // Бренд и небрендовые: небрендовые — все клики, кроме брендовых (в том числе скрытые Google запросы).
+  const b = s.brand;
+  const nb = (x, t) => ({ clicks: t.clicks - x.clicks, impressions: t.impressions - x.impressions });
+  const nbCur = nb(b.current, s.current);
+  const nbPrev = nb(b.previous, s.previous);
+  const share = (v, t) => fmt.pct(t > 0 ? v / t : null, 1);
+  $('gsc-brand').replaceChildren(
+    gscSplitItem('Brand', getComputedStyle(document.documentElement).getPropertyValue('--accent').trim(), `${fmt.int(b.current.clicks)} clicks`,
+      `${share(b.current.clicks, s.current.clicks)} of clicks · CTR ${fmt.pct(gscCtr(b.current), 1)} · pos. ${extraMetric('gsc_position').format(gscPos(b.current))}`,
+      deltaInfo('gsc_clicks', b.current.clicks, b.previous.clicks)),
+    gscSplitItem('Non-brand', getComputedStyle(document.documentElement).getPropertyValue('--google').trim(), `${fmt.int(nbCur.clicks)} clicks`,
+      `${share(nbCur.clicks, s.current.clicks)} of clicks · CTR ${fmt.pct(gscCtr(nbCur), 1)}`,
+      deltaInfo('gsc_clicks', nbCur.clicks, nbPrev.clicks)));
+  renderSeoCharts();
+  renderGscTable('query', 'gsc-queries', 'gsc-queries-count');
+  renderGscTable('page', 'gsc-pages', 'gsc-pages-count');
+  renderGscTable('country', 'gsc-countries', null);
+  const p = s.period;
+  const months = s.tables.months.map((m) => fmt.monthName(m)).join(', ');
+  $('gsc-note').textContent = `Google Search Console, site ${s.site}, web search. `
+    + (p.requestedTo !== p.to ? `Data is shown up to ${fmt.date(p.to)}: Google publishes Search Console data with a 2–3 day delay, and the comparison period has the same length. ` : '')
+    + 'Average position is weighted by impressions (lower is better); CTR — clicks ÷ impressions. '
+    + `Tables of queries, pages and countries — for whole calendar months of the period (${months || '—'}), the largest by impressions; `
+    + 'position change — against the months of the comparison period. Google hides rare queries for privacy, so query rows add up to less than the totals. '
+    + 'Brand queries — Farmacia Familiei, FF, ff.md, DITA, Optica Familiei (and the Russian spelling); non-brand — all other clicks, including hidden queries. '
+    + `Search Console keeps 16 months of data; available from ${fmt.date(s.dataFrom)}.`;
+}
+
+function exportGscCsv() {
+  const columns = gscColumns('query').map((c) => ({
+    title: c.title, type: c.type, digits: c.key === 'ctr' ? 4 : c.key === 'position' || c.key === 'change' ? 1 : 0, value: c.get,
+  }));
+  download(buildCsv(columns, gscRows('query')), `ff-ads-search-queries_${state.filters.from}_${state.filters.to}.csv`);
+}
+
+// ---------- Обзор: ряды Visibility / Engagement / Conversion и раздел GA4 ----------
+
+// Как в Looker: Visibility, Engagement, Conversion — суммы выбранных платформ и бренда (MDL).
+const BL_ROWS = [
+  ['Visibility', ['impressions', 'cpm']],
+  ['Engagement', ['clicks', 'cpc', 'ctr']],
+  ['Conversion', ['conversions', 'cpa', 'spend']],
+];
+const BL_LABELS = { impressions: 'Total impressions', cpm: 'Avg. CPM', clicks: 'Total clicks', cpc: 'Avg. CPC', ctr: 'Avg. CTR', conversions: 'All conversions', cpa: 'Avg. CPA', spend: 'Total spent' };
+const GA_KPIS = ['ga_sessions', 'ga_purchases', 'ga_cr', 'ga_revenue', 'ga_aov'];
+const GA_EVENT_LABELS = {
+  page_view: 'Page view', view_item: 'View item', session_start: 'Session start', add_to_cart: 'Add to cart',
+  begin_checkout: 'Begin checkout', add_payment_info: 'Add payment info', purchase: 'Purchase',
+};
+const GA_SHARE_TOP = 8;
+
+function adsKpi(key, s) {
+  const cur = value(key, s.current.total);
+  const prev = value(key, s.previous.total);
+  const info = deltaInfo(key, cur, prev);
+  return el('article', { class: 'kpi', title: prevTitle(key, prev), dataset: { metric: key } },
+    el('div', { class: 'label', text: BL_LABELS[key] }),
+    el('div', { class: 'value', text: METRICS[key].format(cur) }),
+    el('div', { class: 'delta', dataset: { tone: info.tone }, text: info.text }));
+}
+
+// Доли групп источников: сайты-партнёры — одной долей «Media» (как в Looker), ИИ-ассистенты — «AI»,
+// первые GA_SHARE_TOP и «Other».
+function gaShares(groups, field) {
+  const sum = (list) => list.reduce((n, g) => n + g.current[field], 0);
+  const media = sum(groups.filter((g) => g.media));
+  const ai = sum(groups.filter((g) => g.ai));
+  const list = groups.filter((g) => !g.media && !g.ai && g.key !== 'other').map((g) => ({ label: g.label, value: g.current[field] }));
+  if (media > 0) list.push({ label: 'Media', value: media });
+  if (ai > 0) list.push({ label: 'AI', value: ai });
+  list.sort((a, b) => b.value - a.value);
+  const rest = list.slice(GA_SHARE_TOP).reduce((n, r) => n + r.value, 0) + (groups.find((g) => g.key === 'other')?.current[field] ?? 0);
+  const top = list.slice(0, GA_SHARE_TOP).filter((r) => r.value > 0);
+  if (rest > 0) top.push({ label: 'Other', value: rest });
+  return top;
+}
+
+function renderGaShares(canvasId, legendId, metricKey, rows) {
+  charts.shares(canvasId, metricKey, rows);
+  const total = rows.reduce((n, r) => n + r.value, 0);
+  $(legendId).replaceChildren(...rows.map((r, i) => {
+    const swatch = el('span', { class: 'swatch', 'aria-hidden': 'true' });
+    swatch.style.background = charts.omCampaignColor(i);
+    return el('li', { title: `${r.label}: ${fmt.int(r.value)}` }, swatch, el('span', { text: r.label }),
+      el('span', { class: 'num', text: `${fmt.int(r.value)} · ${fmt.pct(total > 0 ? r.value / total : null, 1)}` }));
+  }));
+}
+
+function renderGaCharts() {
+  const g = state.ga;
+  if (state.view !== 'overview' || !g?.available) return;
+  charts.shopCombo('chart-ga-series', g.series, 'ga_sessions', 'ga_purchases');
+  renderGaShares('chart-ga-sessions', 'ga-sessions-legend', 'ga_sessions', gaShares(g.groups, 'sessions'));
+  renderGaShares('chart-ga-purchases', 'ga-purchases-legend', 'ga_purchases', gaShares(g.groups, 'purchases'));
+}
+
+// Воронка GA4: шаг — подпись, число и доля от предыдущего шага в одной строке; длина полосы — логарифм.
+function renderGaFunnel(g) {
+  const cur = g.funnel.current;
+  const top = Math.log10(Math.max(...cur, 10));
+  const nodes = [el('h3', { text: 'Sessions pipeline' })];
+  g.funnel.events.forEach((ev, i) => {
+    const fill = el('div');
+    fill.style.width = `${cur[i] > 0 ? Math.max(3, (Math.log10(Math.max(cur[i], 1)) / top) * 100).toFixed(1) : 0}%`;
+    const info = deltaInfo('ga_sessions', cur[i], g.funnel.previous[i]);
+    const rate = i > 0 && cur[i - 1] > 0 ? fmt.pct(cur[i] / cur[i - 1], 1) : null;
+    nodes.push(el('div', { class: 'funnel-step', title: `${GA_EVENT_LABELS[ev] ?? ev}: ${info.text}` },
+      el('div', { class: 'row' }, el('span', { text: GA_EVENT_LABELS[ev] ?? ev }),
+        el('span', {}, rate ? el('small', { class: 'muted', text: `${rate} · ` }) : null, el('b', { text: fmt.int(cur[i]) }))),
+      el('div', { class: 'track', 'aria-hidden': 'true' }, fill)));
+  });
+  nodes.push(el('p', { class: 'card-note', text: 'GA4 events; % — of the previous step. Bar length uses a logarithmic scale.' }));
+  $('ga-funnel').replaceChildren(...nodes);
+}
+
+// Раздел GA4 на обзоре: весь сайт (фильтры платформ и бренда к GA4 не применяются). Стоимость покупки —
+// только при всех платформах и всех брендах: иначе расход части рекламы делился бы на покупки всего сайта.
+function renderGa() {
+  const g = state.ga;
+  const f = state.filters;
+  const allAds = f.platforms.length === Object.keys(PLATFORM_LABELS).length && !f.brand;
+  const s = state.summary;
+  $('ga-section').hidden = state.view !== 'overview' || !g?.available;
+  if ($('ga-section').hidden) return;
+  const cpp = allAds && s ? { current: { ...g.current, ad_spend: s.current.total.spend }, previous: { ...g.previous, ad_spend: s.previous.total.spend } } : null;
+  $('ga-kpis').replaceChildren(...GA_KPIS.map((key) => shopKpi(key, { current: g.current, previous: g.previous })),
+    ...(cpp ? [shopKpi('ga_cpp', cpp)] : []));
+  renderGaFunnel(g);
+  renderGaCharts();
+  const total = g.current;
+  const rows = g.groups.filter((x) => x.current.sessions > 0 || x.current.purchases > 0 || x.previous.sessions > 0)
+    .sort((a, b) => (a.key === 'other') - (b.key === 'other') || b.current.sessions - a.current.sessions);
+  const otherTitle = g.otherSources.length
+    ? `Largest sources in Other: ${g.otherSources.map((o) => `${o.source} (${fmt.int(o.sessions)})`).join(', ')}` : undefined;
+  const rowEl = (label, r, prev, cls, title) => {
+    const info = deltaInfo('ga_sessions', r.sessions, prev?.sessions);
+    return el('tr', { class: cls, title },
+      el('td', { class: 'text', text: label }),
+      el('td', { text: fmt.int(r.sessions) }),
+      el('td', { text: fmt.pct(total.sessions > 0 ? r.sessions / total.sessions : null, 1) }),
+      el('td', {}, prev ? el('span', { class: 'delta', dataset: { tone: info.tone }, text: info.short }) : ''),
+      el('td', { text: fmt.int(r.purchases) }),
+      el('td', { text: fmt.pct(total.purchases > 0 ? r.purchases / total.purchases : null, 1) }),
+      el('td', { text: fmt.pct(r.sessions > 0 ? r.purchases / r.sessions : null) }),
+      el('td', { text: fmt.money(r.revenue) }));
+  };
+  $('ga-sources').tBodies[0].replaceChildren(
+    ...rows.map((x) => rowEl(x.media ? `${x.label} (media)` : x.ai ? `${x.label} (AI)` : x.label, x.current, x.previous, undefined, x.key === 'other' ? otherTitle : undefined)),
+    rowEl('Total', total, g.previous, 'total'));
+  const dimLabel = { sourceMedium: 'source / medium', sessionSourceMedium: 'session source / medium', firstUserSourceMedium: 'first user source / medium' }[g.dimension] ?? g.dimension;
+  $('ga-note').textContent = `GA4 — the whole site: platform and brand filters do not apply. Sessions and purchases by ${dimLabel}, grouped by the Looker filters `
+    + '(Meta — the words meta, fb, ig or containing facebook / instagram; Omnisend — containing omnisend or the word push; Simpals — simpals / cpc, 999.md, stiri.md, point.md; '
+    + 'ProTV and other partner sites — by their name; Direct — (direct) / (none)); each session counts in the first matching source. '
+    + 'AI — visits from AI assistants (ChatGPT, Claude, Perplexity, Gemini, Copilot, DeepSeek and others), one share in the charts. Media in the share charts — partner sites and other referral traffic. Ad cost per purchase — ad spend of Google Ads, Meta and Admixer per GA4 purchase (shown with all platforms and all brands selected). '
+    + `Purchase revenue — as recorded by GA4. GA4 data is available from ${fmt.date(g.dataFrom)}.`
+    + (otherTitle ? ` ${otherTitle}.` : '')
+    + gaQualityNote(g.quality);
+}
+
+// Признаки неполных данных GA4 за период — предупреждение под таблицей.
+function gaQualityNote(q) {
+  const parts = [];
+  if (q?.otherRow) parts.push('part of the traffic is grouped by GA4 into an "(other)" row (too many distinct values) and counted in Other');
+  if (q?.thresholding) parts.push('GA4 applied privacy thresholds (small numbers may be hidden)');
+  if (q?.sampling) parts.push('GA4 used sampled data');
+  return parts.length ? ` Note: for this period ${parts.join('; ')} — figures may differ slightly from the GA4 interface.` : '';
+}
+
+function exportGaCsv() {
+  const g = state.ga;
+  if (!g?.available) return;
+  const columns = [
+    { title: 'Source', type: 'text', value: (r) => r.label },
+    { title: 'Media site', type: 'text', value: (r) => (r.media ? 'yes' : '') },
+    { title: 'AI assistant', type: 'text', value: (r) => (r.ai ? 'yes' : '') },
+    { title: 'Sessions', type: 'number', digits: 0, value: (r) => r.current.sessions },
+    { title: 'Sessions (comparison period)', type: 'number', digits: 0, value: (r) => r.previous.sessions },
+    { title: 'Purchases', type: 'number', digits: 0, value: (r) => r.current.purchases },
+    { title: 'Purchases (comparison period)', type: 'number', digits: 0, value: (r) => r.previous.purchases },
+    { title: 'Conversion rate', type: 'number', digits: 4, value: (r) => (r.current.sessions > 0 ? r.current.purchases / r.current.sessions : null) },
+    { title: 'Purchase revenue', type: 'number', digits: 2, value: (r) => r.current.revenue },
+  ];
+  download(buildCsv(columns, g.groups), `ff-ads-ga4-sources_${state.filters.from}_${state.filters.to}.csv`);
+}
+
+// Воронка Meta до покупки: клики по ссылке → просмотры посадочной → корзина → оформление → покупки.
+// Полосы — доля от кликов (линейно), между шагами — конверсия шага, справа — стоимость шага.
+function renderMetaFunnel() {
+  const s = state.summary;
+  const mf = state.metaFunnel;
+  const t = s.current.total;
+  const p = s.previous.total;
+  const steps = [
+    ['Link clicks', t.clicks, p.clicks],
+    ['Landing page views', mf.current.landingPageViews, mf.previous.landingPageViews],
+    ['Adds to cart', mf.current.addsToCart, mf.previous.addsToCart],
+    ['Checkouts initiated', mf.current.checkouts, mf.previous.checkouts],
+    [label('conversions'), t.conversions, p.conversions],
+  ];
+  const top = Math.max(...steps.map(([, v]) => v), 1);
+  const nodes = [el('h3', { text: 'Funnel to purchase' }),
+    el('div', { class: 'funnel-head' }, `${fmt.int(t.impressions)} impressions · CTR ${METRICS.ctr.format(value('ctr', t))}`)];
+  steps.forEach(([name, v, prev], i) => {
+    if (i > 0) {
+      const before = steps[i - 1][1];
+      nodes.push(el('div', { class: 'funnel-rate', text: `→ ${fmt.pct(before > 0 ? v / before : null, 1)} of ${steps[i - 1][0].toLowerCase()}` }));
+    }
+    const fill = el('div');
+    fill.style.width = `${v > 0 ? Math.max(2, Math.min(100, (v / top) * 100)).toFixed(1) : 0}%`;
+    const info = deltaInfo('conversions', v, prev);
+    nodes.push(el('div', { class: 'funnel-step' },
+      el('div', { class: 'row' }, el('span', { text: name }),
+        el('b', {}, fmt.num(v), ' ', el('span', { class: 'delta', dataset: { tone: info.tone }, text: info.short }))),
+      el('div', { class: 'track', 'aria-hidden': 'true' }, fill),
+      el('div', { class: 'funnel-cost', text: `${fmt.money2(v > 0 ? t.spend / v : null)} per ${i === 0 ? 'click' : 'step'}` })));
+  });
+  const first = clicksToPurchase(t);
+  nodes.push(el('p', { class: 'card-note', text: `Clicks to purchases: ${fmt.pct(first, 2)}. Events as counted by Meta (pixel and Conversions API, attribution of the ad account).`
+    + `${mf.dataFrom && state.filters.from < mf.dataFrom ? ` Funnel steps are available from ${fmt.date(mf.dataFrom)}.` : ''}` }));
+  $('funnel').replaceChildren(...nodes);
+}
+const clicksToPurchase = (t) => (t.clicks > 0 ? t.conversions / t.clicks : null);
+
+function renderFunnel() {
+  const s = state.summary;
+  if (!s) return;
+  if (state.view === 'meta' && state.metaFunnel?.available) {
+    renderMetaFunnel();
+    return;
+  }
+  const t = s.current.total;
+  const steps = [['impressions', t.impressions], ['clicks', t.clicks]];
+  if (state.view !== 'admixer') steps.push(['conversions', t.conversions]);
+  const top = Math.log10(Math.max(t.impressions, 10));
+  const rates = [
+    ['CTR', value('ctr', t)],
+    ['Conv. rate', t.clicks > 0 ? t.conversions / t.clicks : null],
+  ];
+  const nodes = [el('h3', { text: 'Funnel' })];
+  steps.forEach(([key, v], i) => {
+    if (i > 0) nodes.push(el('div', { class: 'funnel-rate', text: `${rates[i - 1][0]}: ${fmt.pct(rates[i - 1][1])}` }));
+    const fill = el('div');
+    fill.style.width = `${v > 0 ? Math.max(4, (Math.log10(Math.max(v, 1)) / top) * 100).toFixed(1) : 0}%`;
+    nodes.push(el('div', { class: 'funnel-step' },
+      el('div', { class: 'row' }, el('span', { text: label(key) }), el('b', { text: METRICS[key].format(v) })),
+      el('div', { class: 'track', 'aria-hidden': 'true' }, fill)));
+  });
+  nodes.push(el('p', { class: 'card-note', text: 'Bar length uses a logarithmic scale.' }));
+  $('funnel').replaceChildren(...nodes);
+}
+
+function progressBar(row) {
+  if (!(row.plan > 0)) return null;
+  const bar = el('div', { class: 'bar', 'aria-hidden': 'true' });
+  const fill = el('div', { class: 'fill', dataset: { status: row.fact > row.plan ? 'over' : 'ok' } });
+  fill.style.width = `${Math.min(100, (row.fact / row.plan) * 100)}%`;
+  bar.append(fill);
+  if (row.expected > 0 && row.expected < row.plan) {
+    const mark = el('div', { class: 'mark' });
+    mark.style.left = `${(row.expected / row.plan) * 100}%`;
+    bar.append(mark);
+  }
+  return bar;
+}
+
+function renderBudget() {
+  const b = state.budget;
+  if (!b) return;
+  const labels = STATUS_LABELS[b.mode];
+  const money = (v) => (v === null || v === undefined ? fmt.DASH : fmt.money(v));
+  const tr = (name, r, cls) => el('tr', { class: cls },
+    el('td', {}, name),
+    el('td', { class: 'text' }, el('span', { class: 'status', dataset: { status: r.status }, text: labels[r.status] ?? r.status })),
+    el('td', { text: money(r.plan) }),
+    el('td', {}, el('div', { text: money(r.fact) }), progressBar(r)),
+    el('td', { text: b.mode === 'current' ? money(r.expected) : fmt.DASH }),
+    el('td', { text: money(r.forecast), title: r.forecastPct !== null ? `${fmt.pct(r.forecastPct, 1)} of plan` : null }),
+    el('td', { text: money(r.remaining) }),
+    el('td', { text: b.mode === 'past' ? fmt.DASH : money(r.allowedPerDay) }));
+  const rows = b.rows.map((r) => tr(
+    el('span', { class: 'platform-tag' }, el('span', { class: `swatch swatch-${r.platform}`, 'aria-hidden': 'true' }), PLATFORM_LABELS[r.platform]),
+    r,
+  ));
+  rows.push(tr('Total', b.total, 'total'));
+  $('budget-table').tBodies[0].replaceChildren(...rows);
+
+  let note;
+  if (b.mode === 'current') {
+    note = `Forecast = spend for full days (${b.daysElapsed}) + average daily spend over the last 7 full days `
+      + `(${fmt.money(b.total.avg7)}/day) × remaining days (${b.daysRemaining}, including today). `
+      + 'Status: 90–105% of plan — on track, more — overspend, less — underspend. The mark on the bar shows where spend should be now.';
+  } else if (b.mode === 'past') {
+    note = 'Month completed: status is actual vs plan.';
+  } else {
+    note = 'Month has not started: only the plan is shown.';
+  }
+  if (features().budgetVat) note += ` Plan is shown without TVA: sheet amounts include ${fmt.int(features().budgetVat)}% TVA and are divided by ${fmt.ratio(1 + features().budgetVat / 100)}, like platform spend.`;
+  $('budget-note').textContent = note;
+  charts.pace(b);
+  renderBudgetCampaigns();
+}
+
+// Освоение по кампаниям: план из листа Budget (точное название кампании), факт, прогноз и статус — как у платформ.
+function renderBudgetCampaigns() {
+  const b = state.budgetCampaigns;
+  const show = Boolean(b?.available);
+  $('budget-campaigns-card').hidden = !show;
+  if (!show) return;
+  const labels = STATUS_LABELS[b.mode];
+  const money = (v) => (v === null || v === undefined ? fmt.DASH : fmt.money(v));
+  const tone = (s) => (s === 'over' ? 'bad' : s === 'under' ? 'bad' : s === 'on_track' ? 'good' : null);
+  const columns = [
+    { title: 'Campaign', text: true, cell: (r) => ({
+      text: r.match === 'partial' ? `${r.campaign} → ${r.campaign_names.join(', ')}` : r.campaign,
+      title: r.matched ? `${r.match === 'partial' ? 'Matched by part of the name. ' : ''}${PLATFORM_LABELS[r.platform]} · ID ${r.campaign_ids.join(', ')}`
+        : r.candidates.length ? `Several campaigns contain this name: ${r.candidates.join('; ')} — write the exact name in the Budget sheet` : 'No campaign with this name on this platform — check the name in the Budget sheet',
+    }) },
+    { title: 'Platform', text: true, cell: (r) => PLATFORM_LABELS[r.platform] },
+    { title: 'Status', text: true, cell: (r) => ({ text: r.matched ? (labels[r.status] ?? r.status) : 'Not found', tone: r.matched ? tone(r.status) : 'bad' }) },
+    { title: 'Plan', cell: (r) => money(r.plan) },
+    { title: 'Actual', cell: (r) => ({ text: money(r.fact), title: r.plan > 0 ? `${fmt.pct(r.fact / r.plan, 0)} of plan` : null }) },
+    { title: 'Expected by now', cell: (r) => (b.mode === 'current' ? money(r.expected) : fmt.DASH) },
+    { title: 'Forecast', cell: (r) => ({ text: money(r.forecast), title: r.forecastPct !== null ? `${fmt.pct(r.forecastPct, 0)} of plan` : null, tone: r.matched ? tone(r.status) : null }) },
+    { title: 'Remaining', cell: (r) => money(r.remaining) },
+    { title: 'Allowed per day', cell: (r) => (b.mode === 'current' ? money(r.allowedPerDay) : fmt.DASH) },
+  ];
+  renderSnapTable('budget-campaigns-table', columns, b.rows, 'No campaign plans for this month');
+  const off = b.rows.filter((r) => r.matched && (r.status === 'over' || r.status === 'under')).length;
+  $('budget-campaigns-count').textContent = `(${fmt.int(b.rows.length)} campaigns${off ? `, ${fmt.int(off)} off pace` : ''}${b.unmatched.length ? `, ${fmt.int(b.unmatched.length)} not found` : ''})`;
+  const notes = ['Plan per campaign from the Budget sheet: exact campaign name (case and extra spaces do not matter); if there is no exact match — the only active campaign of the platform whose name contains the sheet text (shown as “sheet text → campaign”). Status and forecast — as for channels: 90–105% of plan on track.'];
+  if (features().budgetVat) notes.push(`Plan without ${fmt.int(features().budgetVat)}% TVA (sheet amounts ÷ ${fmt.ratio(1 + features().budgetVat / 100)}), comparable with platform spend.`);
+  if (b.unmatched.length) notes.push(`Not found: ${b.unmatched.map((u) => `${u.campaign} (${PLATFORM_LABELS[u.platform]}${u.candidates.length ? `, ${u.candidates.length} similar` : ''})`).join(', ')} — check the names in the sheet; hover a row to see similar campaigns.`);
+  if (b.unplanned.length) {
+    const top = b.unplanned.slice(0, 5).map((u) => `${u.campaign} (${fmt.money(u.spend)})`).join(', ');
+    notes.push(`Spend without a campaign plan this month: ${top}${b.unplanned.length > 5 ? ` and ${fmt.int(b.unplanned.length - 5)} more` : ''}.`);
+  }
+  $('budget-campaigns-note').textContent = notes.join(' ');
+}
+
+// Колонки таблицы кампаний: на странице платформы колонки «Платформа» нет,
+// а показатели и подписи — как у этой платформы.
+function tableColumns() {
+  const cols = [];
+  if (state.view === 'overview') {
+    cols.push({
+      key: 'platform', title: 'Platform', type: 'text', get: (r) => PLATFORM_LABELS[r.platform],
+      cell: (r) => el('td', {}, el('span', { class: 'platform-tag' }, el('span', { class: `swatch swatch-${r.platform}`, 'aria-hidden': 'true' }), PLATFORM_LABELS[r.platform])),
+    });
+  }
+  cols.push(
+    {
+      key: 'name', title: 'Campaign', type: 'text', get: (r) => r.name,
+      cell: (r) => campaignNameCell(r),
+    },
+    {
+      key: 'trend', title: 'Spend trend', type: 'spark', sortable: false, get: () => null,
+      cell: (r) => el('td', { class: 'spark-cell' }, sparkline(r.spark, r.platform)),
+    },
+    {
+      key: 'brand', title: 'Brand', type: 'text', get: (r) => r.brand,
+      cell: (r) => el('td', { class: 'text' }, el('span', { class: 'brand-tag', text: BRAND_LABELS[r.brand] ?? r.brand })),
+    },
+    {
+      key: 'goal', title: 'Goal', type: 'text', get: (r) => goalLabel(r),
+      cell: (r) => el('td', { class: 'text' }, r.goal ? el('span', { class: `goal-tag goal-${r.goal}`, text: goalLabel(r) || r.goal, title: r.optimization ? `Ad sets optimize for: ${OPT_LABELS[r.optimization] ?? r.optimization}` : null }) : fmt.DASH),
+    },
+    ...view().metrics.map((k) => ({
+      key: k, title: label(k), type: 'number', get: (r) => value(k, r),
+      cell: (r, ctx) => {
+        const t = ctx ? metricTone(k, r, ctx) : null;
+        return el('td', { text: METRICS[k].format(value(k, r)), title: t?.tip ?? null, dataset: t?.tone ? { hl: t.tone } : {} });
+      },
+    })),
+  );
+  // Meta: охват и частота кампаний — за стандартные периоды (по данным Meta за период целиком).
+  const byCampaign = state.view === 'meta' ? state.metaReach?.campaigns : null;
+  if (byCampaign && Object.keys(byCampaign).length) {
+    const reachOf = (r) => byCampaign[r.campaign_id]?.[0] ?? null;
+    const freqOf = (r) => { const x = byCampaign[r.campaign_id]; return x && x[0] > 0 ? x[1] / x[0] : null; };
+    cols.push(
+      { key: 'reach', title: 'Reach', type: 'number', get: reachOf, cell: (r) => el('td', { text: reachOf(r) === null ? fmt.DASH : fmt.int(reachOf(r)) }) },
+      {
+        key: 'frequency', title: 'Frequency', type: 'number', get: freqOf,
+        cell: (r) => {
+          const f = freqOf(r);
+          if (f === null) return el('td', { text: fmt.DASH });
+          const days = periodDays();
+          const limit = freqLimit(days);
+          return el('td', {
+            text: fmt.ratio(f), dataset: f > limit ? { hl: 'bad' } : {},
+            title: `Frequency over ${days} days: ${fmt.ratio(f)} impressions per person. Red above ${fmt.int(limit)} for this period length — the audience sees the ads too often.`,
+          });
+        },
+      },
+    );
+  }
+  return cols;
+}
+
+// ---------- Главные изменения (What changed) ----------
+// Кампании, которые сильнее всего изменили расход или эффективность к периоду сравнения (те же фильтры).
+// Эффективность — по показателю цели кампании: продажи — CPA, охват — CPM, трафик — CPC.
+const CHANGES_TOP = 3;
+const CHANGE_MIN_SHARE = 0.01; // доля в расходе периода, ниже — шум
+const CHANGE_MIN_REL = 0.15; // изменение эффективности от 15 %
+const GOAL_KPI = { sales: 'cpa', awareness: 'cpm', traffic: 'cpc' };
+
+function changeItem(r, main, sub) {
+  const swatch = el('span', { class: `swatch swatch-${r.platform}`, 'aria-hidden': 'true' });
+  const item = el('button', { type: 'button', class: 'change-item', title: `Show ${r.name} in Campaigns` },
+    el('span', { class: 'change-name' }, swatch, r.name || r.campaign_id),
+    el('span', { class: 'change-main', text: main }),
+    sub ? el('span', { class: 'change-sub', text: sub }) : null);
+  item.addEventListener('click', () => {
+    state.search = r.name || r.campaign_id;
+    $('campaign-search').value = state.search;
+    renderTable();
+    $('campaigns-title').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  });
+  return item;
+}
+
+function changeCard(title, tone, items) {
+  return el('div', { class: 'card change-card', dataset: { tone } },
+    el('h3', { text: title }),
+    el('div', { class: 'change-list' }, ...items));
+}
+
+function renderChanges() {
+  const ch = state.changes;
+  const show = !OWN_VIEWS.includes(state.view) && Boolean(ch?.rows?.length);
+  $('changes-section').hidden = !show;
+  if (!show) return;
+  const rows = ch.rows;
+  const total = rows.reduce((t, r) => t + Math.max(r.current.spend, r.previous.spend), 0);
+  const big = (r) => total > 0 && Math.max(r.current.spend, r.previous.spend) / total >= CHANGE_MIN_SHARE;
+  const pctOf = (cur, prev) => (prev > 0 ? cur / prev - 1 : null);
+  const signed = (v) => `${v > 0 ? '+' : v < 0 ? '−' : ''}${fmt.money(Math.abs(v))}`;
+  const signedPct = (v) => (v === null ? 'new' : `${v > 0 ? '+' : v < 0 ? '−' : ''}${fmt.pct(Math.abs(v), 0)}`);
+  // Линейка из нескольких кампаний (пересоздаются каждый месяц) — показать, сколько их в строке.
+  const many = (r) => (r.campaigns > 1 ? ` · ${r.campaigns} campaigns` : '');
+
+  const moved = rows.filter((r) => big(r) && r.current.spend > 0 && r.previous.spend > 0)
+    .map((r) => ({ r, d: r.current.spend - r.previous.spend }));
+  const up = moved.filter((x) => x.d > 0).sort((a, b) => b.d - a.d).slice(0, CHANGES_TOP)
+    .map(({ r, d }) => changeItem(r, `${signed(d)} (${signedPct(pctOf(r.current.spend, r.previous.spend))})`, `Spend ${fmt.money(r.current.spend)}${many(r)}`));
+  const down = moved.filter((x) => x.d < 0).sort((a, b) => a.d - b.d).slice(0, CHANGES_TOP)
+    .map(({ r, d }) => changeItem(r, `${signed(d)} (${signedPct(pctOf(r.current.spend, r.previous.spend))})`, `Spend ${fmt.money(r.current.spend)}${many(r)}`));
+
+  // Эффективность: оба периода с заметным расходом; для CPA — не меньше 3 конверсий в каждом периоде.
+  const eff = [];
+  for (const r of rows) {
+    const key = GOAL_KPI[evalGoal(r)];
+    if (!key || !big(r) || !(r.current.spend > 0 && r.previous.spend > 0)) continue;
+    if (key === 'cpa' && (r.current.conversions < 3 || r.previous.conversions < 3)) continue;
+    const cur = value(key, r.current);
+    const prev = value(key, r.previous);
+    if (!(cur > 0 && prev > 0)) continue;
+    const rel = cur / prev - 1; // для CPA, CPM, CPC рост — хуже
+    if (Math.abs(rel) < CHANGE_MIN_REL) continue;
+    eff.push({ r, key, cur, prev, rel });
+  }
+  const effItem = ({ r, key, cur, prev, rel }) => changeItem(r, `${label(key)} ${METRICS[key].format(cur)} (${signedPct(rel)})`, `was ${METRICS[key].format(prev)} · ${goalLabel(r)}${many(r)}`);
+  const better = eff.filter((x) => x.rel < 0).sort((a, b) => a.rel - b.rel).slice(0, CHANGES_TOP).map(effItem);
+  const worse = eff.filter((x) => x.rel > 0).sort((a, b) => b.rel - a.rel).slice(0, CHANGES_TOP).map(effItem);
+
+  // Пустые карточки не показываем; если пусты все — блок сворачивается до строки пояснения.
+  const cards = [
+    ['Spend grew', 'neutral', up],
+    ['Spend fell', 'neutral', down],
+    ['Efficiency improved', 'good', better],
+    ['Efficiency worsened', 'bad', worse],
+  ].filter(([, , items]) => items.length).map(([title, tone, items]) => changeCard(title, tone, items));
+  $('changes').replaceChildren(...cards);
+  $('changes').hidden = !cards.length;
+
+  const started = rows.filter((r) => r.previous.spend === 0 && r.current.spend > 0).sort((a, b) => b.current.spend - a.current.spend);
+  const stopped = rows.filter((r) => r.current.spend === 0 && r.previous.spend > 0).sort((a, b) => b.previous.spend - a.previous.spend);
+  const names = (list, key) => list.slice(0, CHANGES_TOP).map((r) => `${r.name} (${fmt.money(r[key].spend)})`).join(', ') + (list.length > CHANGES_TOP ? ` and ${list.length - CHANGES_TOP} more` : '');
+  const vs = ch.period.compare === 'yoy' ? 'the same period last year' : 'the previous period';
+  const period = `${vs} (${fmt.date(ch.period.prevFrom)} — ${fmt.date(ch.period.prevTo)})`;
+  const parts = cards.length
+    ? [`Compared with ${period}, with the same filters.`]
+    : [`No notable changes vs ${period} · ${started.length} new, ${stopped.length} stopped.`];
+  if (started.length) parts.push(`New campaigns: ${names(started, 'current')}.`);
+  if (stopped.length) parts.push(`Stopped: ${names(stopped, 'previous')}.`);
+  if (cards.length) parts.push(`Only campaigns with at least ${fmt.pct(CHANGE_MIN_SHARE, 0)} of spend; efficiency — by the goal metric (Sales — CPA with 3+ conversions in both periods, Awareness — CPM, Traffic — CPC), changes from ${fmt.pct(CHANGE_MIN_REL, 0)}. Campaigns re-created each month are compared as one line (name without month and year). Click a line to find its campaigns in the table.`);
+  $('changes-note').textContent = parts.join(' ');
+}
+
+// ---------- Таблица кампаний: подсветка, мини-графики, итог ----------
+
+// Подсветка эффективности: только показатели, важные для цели кампании (продажи — ROAS и CPA, охват — CPM,
+// трафик — CPC и CTR), и только относительно кампаний той же платформы и цели. Лучше среднего группы на HL_GAP
+// и больше — good, хуже — bad; у кампаний с долей расхода группы от HL_MIN_SHARE.
+const HL_GAP = 0.25;
+const HL_MIN_SHARE = 0.02;
+const HL_METRICS = { roas: 'up', cpa: 'down', ctr: 'up', cpc: 'down', cpm: 'down' };
+const GOAL_METRICS = { sales: ['roas', 'cpa'], awareness: ['cpm'], traffic: ['cpc', 'ctr'] };
+const GOAL_LABELS = { sales: 'Sales', awareness: 'Awareness', traffic: 'Traffic', app: 'App', engagement: 'Engagement', leads: 'Leads', other: 'Other' };
+// Событие оптимизации групп объявлений Meta. Если оно не то, что обычно у цели кампании (например, Sales-кампания
+// оптимизируется на добавление в корзину), — показывается рядом с целью, а кампания не сравнивается по метрикам
+// цели (ROAS и CPA считаются по покупкам) и не подсвечивается.
+const OPT_LABELS = {
+  purchase: 'Purchase', add_to_cart: 'Add to cart', initiate_checkout: 'Checkout', add_payment_info: 'Payment info', view_content: 'View content',
+  lead: 'Lead', complete_registration: 'Registration', search: 'Search', contact: 'Contact', subscribe: 'Subscribe', other_conversion: 'Custom conversion',
+  link_clicks: 'Link clicks', landing_page_views: 'Landing page views', reach: 'Reach', impressions: 'Impressions', thruplay: 'ThruPlay',
+  post_engagement: 'Engagement', app_installs: 'App installs', conversations: 'Conversations',
+};
+const OPT_NATURAL = {
+  sales: ['purchase'], traffic: ['link_clicks', 'landing_page_views'], awareness: ['reach', 'impressions', 'thruplay'],
+  app: ['app_installs'], leads: ['lead'], engagement: ['post_engagement', 'conversations'],
+};
+const optMismatch = (r) => Boolean(r.optimization) && !(OPT_NATURAL[r.goal] ?? []).includes(r.optimization);
+function goalLabel(r) {
+  const g = GOAL_LABELS[r.goal] ?? '';
+  return optMismatch(r) ? `${g} · ${OPT_LABELS[r.optimization] ?? r.optimization}` : g;
+}
+const evalGoal = (r) => (optMismatch(r) ? `${r.goal ?? 'other'}:${r.optimization}` : r.goal ?? 'other');
+const groupKey = (r) => `${r.platform}|${evalGoal(r)}`;
+
+function sumRows(rows) {
+  const t = { spend: 0, revenue: 0, conversions: 0, impressions: 0, clicks: 0 };
+  for (const r of rows) for (const k of Object.keys(t)) t[k] += r[k] ?? 0;
+  return t;
+}
+
+// Сравнение — со средним своей платформы (поиск Google и Meta по CTR и CPM несравнимы).
+function campaignContext(rows) {
+  const groups = {};
+  for (const k of new Set(rows.map(groupKey))) {
+    const list = rows.filter((r) => groupKey(r) === k);
+    groups[k] = { total: sumRows(list), n: list.length };
+  }
+  return { groups };
+}
+
+// Цели владельца — абсолютные пороги вместо сравнения с группой: ROAS Sales-кампаний (на покупку) — от ROAS_TARGET
+// зелёный, ниже — красный; частота Meta выше порога по длине периода (FREQ_LIMITS) — красный (аудитория видит рекламу слишком часто).
+const ROAS_TARGET = 3;
+// Частота за период копится: за неделю 4 показа на человека — уже много, за месяц — норма. Порог — по длине периода.
+const FREQ_LIMITS = [[7, 4], [14, 6], [31, 8], [Infinity, 10]];
+const freqLimit = (days) => FREQ_LIMITS.find(([d]) => days <= d)[1];
+const periodDays = () => {
+  const p = state.summary?.period;
+  return p?.from && p?.to ? daysBetween(p.from, p.to) + 1 : 7;
+};
+const PLATFORM_NAMES = { meta: 'Meta', google: 'Google Ads', admixer: 'Admixer' };
+
+// Подсветка ячейки и подсказка при наведении: { tone: 'good' | 'bad' | null, tip } или null — метрика не оценивается.
+function metricTone(key, r, ctx) {
+  const dir = HL_METRICS[key];
+  if (!dir || !(GOAL_METRICS[evalGoal(r)] ?? []).includes(key)) return null;
+  const v = value(key, r);
+  if (key === 'roas') {
+    if (!(r.spend > 0) || v === null || v === undefined) return null;
+    const rel = v / ROAS_TARGET - 1;
+    return {
+      tone: v >= ROAS_TARGET ? 'good' : 'bad',
+      tip: `Target ROAS ${fmt.ratio(ROAS_TARGET)}: this ${fmt.ratio(v)} (${rel >= 0 ? '+' : '−'}${fmt.pct(Math.abs(rel), 0)}). Green from ${fmt.ratio(ROAS_TARGET)}, red below.`,
+    };
+  }
+  const g = ctx.groups[groupKey(r)];
+  const group = `${PLATFORM_NAMES[r.platform] ?? r.platform} · ${goalLabel(r) || 'Other'}`;
+  // Сравнивать не с чем: в группе меньше двух кампаний.
+  if (!g || g.n < 2) return { tone: null, tip: `Not highlighted: the only ${group} campaign in the selection.` };
+  const total = g.total;
+  if (!(total.spend > 0)) return null;
+  const share = r.spend / total.spend;
+  if (share < HL_MIN_SHARE) return { tone: null, tip: `Not highlighted: ${fmt.pct(share, 1)} of ${group} spend (from ${fmt.pct(HL_MIN_SHARE, 0)}).` };
+  // Для показателей результата нужны результаты: CPA без покупок не сравнивается.
+  if (key === 'cpa' && !(total.conversions > 0)) return null;
+  const avg = value(key, total);
+  if (v === null || v === undefined || !(avg > 0)) return null;
+  const rel = v / avg - 1;
+  const better = dir === 'up' ? rel : -rel;
+  const tone = better >= HL_GAP ? 'good' : better <= -HL_GAP ? 'bad' : null;
+  return {
+    tone,
+    tip: `${label(key)} of ${group} (${g.n} campaigns): ${METRICS[key].format(avg)}; this ${rel >= 0 ? '+' : '−'}${fmt.pct(Math.abs(rel), 0)}. `
+      + `Green / red from ${fmt.pct(HL_GAP, 0)} ${dir === 'up' ? 'above / below' : 'below / above'}.`,
+  };
+}
+
+// Мини-график расхода (SVG): точки — отрезки периода; цвет — цвет платформы.
+function sparkline(points, platform) {
+  if (!Array.isArray(points) || points.length < 2) return document.createTextNode(fmt.DASH);
+  const W = 84;
+  const H = 22;
+  const max = Math.max(...points, 0);
+  const ns = 'http://www.w3.org/2000/svg';
+  const svg = document.createElementNS(ns, 'svg');
+  svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+  svg.setAttribute('width', W);
+  svg.setAttribute('height', H);
+  svg.setAttribute('class', 'spark');
+  svg.setAttribute('aria-hidden', 'true');
+  const xy = points.map((v, i) => [(i / (points.length - 1)) * (W - 2) + 1, max > 0 ? H - 2 - (v / max) * (H - 4) : H - 2]);
+  const area = document.createElementNS(ns, 'path');
+  area.setAttribute('d', `M${xy[0][0]},${H - 1} ${xy.map(([x, y]) => `L${x.toFixed(1)},${y.toFixed(1)}`).join(' ')} L${xy.at(-1)[0]},${H - 1} Z`);
+  area.setAttribute('class', `spark-area swatch-fill-${platform}`);
+  const line = document.createElementNS(ns, 'polyline');
+  line.setAttribute('points', xy.map(([x, y]) => `${x.toFixed(1)},${y.toFixed(1)}`).join(' '));
+  line.setAttribute('class', `spark-line swatch-stroke-${platform}`);
+  svg.append(area, line);
+  const wrap = el('span', { class: 'spark-wrap', title: `Spend over the period: max ${fmt.money(max)} per point` });
+  wrap.append(svg);
+  return wrap;
+}
+
+function sparkStepText() {
+  const f = state.filters;
+  const span = diffDays(f.from, f.to) + 1;
+  const step = Math.max(1, Math.ceil(span / 40));
+  return step === 1 ? 'one day' : `${step} days`;
+}
+
+function visibleCampaigns() {
+  if (!state.campaigns) return [];
+  const q = state.search.trim().toLocaleLowerCase('ru');
+  const columns = tableColumns();
+  const col = columns.find((c) => c.key === state.sort.key) ?? columns.find((c) => c.key === 'spend');
+  const dir = state.sort.dir === 'asc' ? 1 : -1;
+  return state.campaigns.rows
+    .filter((r) => !q || r.name.toLocaleLowerCase('ru').includes(q) || r.campaign_id.includes(q))
+    .sort((a, b) => {
+      const va = col.get(a);
+      const vb = col.get(b);
+      if (va === null || va === undefined) return 1;
+      if (vb === null || vb === undefined) return -1;
+      if (col.type === 'text') return dir * String(va).localeCompare(String(vb), 'ru');
+      return dir * (va - vb);
+    });
+}
+
+function renderTableHead() {
+  const row = $('campaigns-table').tHead.rows[0];
+  row.replaceChildren(...tableColumns().map((c) => {
+    if (c.sortable === false) return el('th', { scope: 'col', class: 'text', text: c.title });
+    const sorted = state.sort.key === c.key;
+    return el('th', {
+      scope: 'col',
+      class: `sortable${c.type === 'text' ? ' text' : ''}`,
+      'aria-sort': sorted ? (state.sort.dir === 'asc' ? 'ascending' : 'descending') : 'none',
+    }, el('button', { type: 'button', dataset: { key: c.key }, text: c.title }));
+  }));
+}
+
+function renderTable() {
+  renderTableHead();
+  const columns = tableColumns();
+  const rows = visibleCampaigns();
+  const body = $('campaigns-table').tBodies[0];
+  if (rows.length === 0) {
+    body.replaceChildren(el('tr', {}, el('td', { colspan: columns.length, class: 'text muted', text: state.campaigns ? 'No campaigns in the selected period' : 'Loading…' })));
+  } else {
+    const ctx = campaignContext(state.campaigns.rows);
+    const frag = document.createDocumentFragment();
+    for (const r of rows) {
+      frag.append(el('tr', {}, ...columns.map((c) => c.cell(r, ctx))));
+    }
+    body.replaceChildren(frag);
+  }
+  // Итог по показанным строкам (с учётом поиска).
+  const foot = $('campaigns-table').tFoot.rows[0];
+  if (rows.length > 1) {
+    const t = sumRows(rows);
+    foot.replaceChildren(...columns.map((c) => {
+      if (c.key === 'name') return el('th', { scope: 'row', class: 'text', text: `Total (${fmt.int(rows.length)})` });
+      if (c.type !== 'number') return el('td');
+      const v = c.key === 'reach' || c.key === 'frequency' ? null : value(c.key, t);
+      return el('td', { text: v === null || v === undefined ? '' : METRICS[c.key].format(v) });
+    }));
+  } else {
+    foot.replaceChildren();
+  }
+  $('campaigns-note').textContent = rows.length
+    ? `Spend trend — spend over the period (each point is ${sparkStepText()}). Goal — from the platform (Meta objective, Google Ads campaign type) or the campaign name. `
+      + `ROAS of Sales campaigns — green from the target ${fmt.ratio(ROAS_TARGET)}, red below. `
+      + `Other metrics — green / red when at least ${fmt.pct(HL_GAP, 0)} better / worse than the campaigns of the same platform and goal: Sales — CPA, Awareness — CPM, Traffic — CPC and CTR; `
+      + `not for campaigns with less than ${fmt.pct(HL_MIN_SHARE, 0)} of their group's spend. `
+      + (state.view === 'meta' ? `Frequency — red above ${fmt.int(freqLimit(periodDays()))} for ${periodDays()} days (up to 7 days — 4, 14 — 6, 31 — 8, longer — 10). ` : '')
+      + 'App, Engagement, Leads and Other are not highlighted, nor Meta campaigns whose ad sets optimize for another event (e.g. Sales · Add to cart: ROAS and CPA count purchases). '
+      + 'Hover a value to see what it is compared with.'
+    : '';
+  const total = state.campaigns?.rows.length ?? 0;
+  $('campaigns-count').textContent = state.campaigns ? (rows.length === total ? `(${total})` : `(${rows.length} of ${total})`) : '';
+}
+
+function renderCharts() {
+  const f = state.filters;
+  if (!f) return;
+  if (state.daily) {
+    charts.daily($('daily-metric').value, state.daily, f.platforms);
+    for (const k of ['cpm', 'cpc', 'ctr']) charts.daily(k, state.daily, f.platforms, `chart-${k}`);
+  }
+  if (state.days) {
+    const [bar, line] = view().results;
+    const labels = labelsFor([bar, line]);
+    charts.results('chart-results', state.days, f.platforms, bar, line, labels);
+    charts.weekday('chart-weekday', state.days, f.platforms, bar, line, labels);
+  }
+  $('structure-section').hidden = state.view !== 'overview';
+  if (state.summary && state.view === 'overview') {
+    charts.share($('share-metric').value, state.summary.current.byPlatform, f.platforms);
+    charts.compare($('compare-metric').value, state.summary, f.platforms);
+    const s = state.summary.period;
+    $('compare-note').textContent = `Current period: ${fmt.date(s.from)} — ${fmt.date(s.to)}; `
+      + `${s.compare === 'yoy' ? 'last year' : 'previous'}: ${fmt.date(s.prevFrom)} — ${fmt.date(s.prevTo)}.`;
+  }
+  if (state.campaigns) charts.bubble($('bubble-metric').value, state.campaigns.rows, f.platforms);
+  if (state.budget) charts.pace(state.budget);
+}
+
+// ---------- По месяцам ----------
+
+const MONTHLY_COLUMNS = [
+  { title: 'Spend', get: (r) => r.spend, format: fmt.money },
+  { title: 'Plan', get: (r) => (r.plan > 0 ? r.plan : null), format: (v) => (v === null ? fmt.DASH : fmt.money(v)) },
+  { title: '% of plan', get: (r) => (r.plan > 0 ? r.spend / r.plan : null), format: (v) => (v === null ? fmt.DASH : fmt.pct(v, 0)) },
+  { title: 'Revenue', get: (r) => r.revenue, format: fmt.money },
+  { title: 'ROAS', get: (r) => value('roas', r), format: METRICS.roas.format },
+  { title: 'Conversions', get: (r) => r.conversions, format: METRICS.conversions.format },
+  { title: 'CPA', get: (r) => value('cpa', r), format: METRICS.cpa.format },
+  { title: 'Clicks', get: (r) => r.clicks, format: METRICS.clicks.format },
+  { title: 'CTR', get: (r) => value('ctr', r), format: METRICS.ctr.format },
+];
+
+function renderMonthly() {
+  const section = $('monthly');
+  if (!section) return;
+  section.hidden = !features().monthly;
+  const m = state.monthly;
+  if (!m || section.hidden) return;
+  const platforms = state.filters.platforms;
+  const head = $('monthly-table').tHead.rows[0];
+  head.replaceChildren(
+    el('th', { scope: 'col', class: 'text', text: 'Month' }),
+    ...MONTHLY_COLUMNS.map((c) => el('th', { scope: 'col', text: c.title })),
+    ...platforms.map((p) => el('th', { scope: 'col', text: `Spend ${PLATFORM_LABELS[p]}` })),
+  );
+  const rowEl = (label, r, cls) => el('tr', { class: cls },
+    el('td', { class: 'text', text: label }),
+    ...MONTHLY_COLUMNS.map((c) => el('td', { text: c.format(c.get(r)) })),
+    ...platforms.map((p) => el('td', { text: fmt.money(r.byPlatform[p] ?? 0) })));
+  const rows = m.rows.map((r) => rowEl(`${fmt.monthName(r.month.slice(0, 7))}${r.partial ? ' *' : ''}`, r));
+  if (m.rows.length > 1) rows.push(rowEl('Total', m.total, 'total'));
+  $('monthly-table').tBodies[0].replaceChildren(...(rows.length ? rows
+    : [el('tr', {}, el('td', { colspan: 1 + MONTHLY_COLUMNS.length + platforms.length, class: 'text muted', text: 'No data for the selected period' }))]));
+  $('monthly-note').textContent = m.rows.some((r) => r.partial)
+    ? '* Month only partly in the period: actuals cover the period days, the plan covers the whole month.'
+    : '';
+}
+
+function exportMonthlyCsv() {
+  const m = state.monthly;
+  if (!m) return;
+  const platforms = state.filters.platforms;
+  const columns = [
+    { title: 'Month', type: 'text', value: (r) => r.month.slice(0, 7) },
+    { title: 'Spend, MDL', type: 'number', digits: 2, value: (r) => r.spend },
+    { title: 'Plan, MDL', type: 'number', digits: 2, value: (r) => (r.plan > 0 ? r.plan : null) },
+    { title: '% of plan', type: 'number', digits: 2, value: (r) => (r.plan > 0 ? (r.spend / r.plan) * 100 : null) },
+    { title: 'Revenue, MDL', type: 'number', digits: 2, value: (r) => r.revenue },
+    { title: 'ROAS', type: 'number', digits: 4, value: (r) => value('roas', r) },
+    { title: 'Conversions', type: 'number', digits: 2, value: (r) => r.conversions },
+    { title: 'CPA, MDL', type: 'number', digits: 2, value: (r) => value('cpa', r) },
+    { title: 'Impressions', type: 'number', digits: 0, value: (r) => r.impressions },
+    { title: 'Clicks', type: 'number', digits: 0, value: (r) => r.clicks },
+    ...platforms.map((p) => ({ title: `Spend ${PLATFORM_LABELS[p]}, MDL`, type: 'number', digits: 2, value: (r) => r.byPlatform[p] ?? 0 })),
+  ];
+  download(buildCsv(columns, m.rows), `ff-ads-po-mesyacam_${state.filters.from}_${state.filters.to}.csv`);
+}
+
+function download(text, filename) {
+  const blob = new Blob([text], { type: 'text/csv;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = el('a', { href: url, download: filename });
+  document.body.append(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function renderViewLabels() {
+  const [bar, line] = view().results;
+  $('results-daily-title').textContent = `${label(bar)} and ${label(line)}`;
+  $('cpc-title').textContent = label('cpc');
+}
+
+function renderAll() {
+  renderView();
+  markKpis();
+}
+
+function renderView() {
+  renderSources();
+  renderDq();
+  renderInsights();
+  renderAlerts();
+  $('app').dataset.view = state.view;
+  // Блоки своих вкладок (Shopify, Omnisend) и раздел GA4 обзора скрыты на остальных.
+  for (const id of ['placements-section', 'creatives-section', 'shopify-section', 'omnisend-section', 'seo-section', 'dataedge-section', 'maps-section', 'onesignal-section', 'ga-section', 'changes-section', 'quality-section', 'fatigue-section', 'emq-section', 'share-section', 'terms-section', 'video-section', 'team-section']) $(id).hidden = true;
+  $('kpis').className = 'kpis';
+  if (state.view === 'team') {
+    renderTeam();
+    return;
+  }
+  if (state.view === 'shopify') {
+    renderShopify();
+    return;
+  }
+  if (state.view === 'omnisend') {
+    renderOmnisend();
+    return;
+  }
+  if (state.view === 'seo') {
+    renderSeo();
+    return;
+  }
+  if (state.view === 'dataedge') {
+    renderDataEdge();
+    return;
+  }
+  if (state.view === 'maps') {
+    renderMaps();
+    return;
+  }
+  if (state.view === 'onesignal') {
+    renderOneSignal();
+    return;
+  }
+  renderViewLabels();
+  renderHero();
+  renderKpis();
+  renderPlatforms();
+  renderBreakdowns();
+  renderPlacements();
+  renderCreatives();
+  renderAdsets();
+  renderVideos();
+  renderQuality();
+  renderFatigue();
+  renderEmq();
+  renderShare();
+  renderTerms();
+  renderChanges();
+  renderReach();
+  renderFunnel();
+  renderBudget();
+  renderCharts();
+  renderTable();
+  renderMonthly();
+  renderGa();
+}
+
+// ---------- Загрузка ----------
+
+function errorText(prefix, err) {
+  return `${prefix}: ${err.message}${err.requestId ? ` (code ${err.requestId.slice(0, 8)})` : ''}`;
+}
+
+async function loadBudget() {
+  const f = state.filters;
+  const params = { month: $('budget-month').value, platforms: f.platforms.join(',') };
+  if (f.brand) params.brand = f.brand;
+  if (f.partner) params.partner = f.partner;
+  state.budget = await api('/api/budget', params);
+  // План по кампаниям — без бренда-партнёра (план привязан к кампаниям, а не к группам объявлений).
+  state.budgetCampaigns = features().budgetCampaigns && !f.partner ? await api('/api/budget/campaigns', params) : null;
+}
+
+async function loadStatus() {
+  try {
+    state.status = await api('/api/status');
+    renderSources();
+  } catch { /* статус не критичен */ }
+}
+
+let loading = false;
+let reloadQueued = false;
+
+async function loadAll() {
+  // Фильтр поменяли во время загрузки — загрузить ещё раз после текущей.
+  if (loading) {
+    reloadQueued = true;
+    return;
+  }
+  const f = readFilters();
+  const problem = validateFilters(f);
+  state.errors = problem ? [problem] : [];
+  if (problem) {
+    renderAlerts();
+    return;
+  }
+  loading = true;
+  state.filters = f;
+  await loadAgent();
+  saveFiltersToUrl(f);
+  $('app').classList.add('loading');
+  try {
+    const params = apiParams(f);
+    if (state.view === 'team') {
+      state.lastLoad = Date.now();
+      $('updated-at').textContent = `Updated at ${fmt.time(new Date())}`;
+      renderAll();
+      return;
+    }
+    if (state.view === 'shopify') {
+      const g = $('shop-granularity').value;
+      const [shop, products, status] = await Promise.allSettled([
+        api('/api/shopify', g === 'auto' ? params : { ...params, granularity: g }),
+        api('/api/shopify/products', params),
+        api('/api/status'),
+      ]);
+      if (shop.status === 'fulfilled') state.shopify = shop.value; else state.errors.push(errorText('Shopify', shop.reason));
+      if (products.status === 'fulfilled') state.shopProducts = products.value; else state.errors.push(errorText('Shopify products', products.reason));
+      if (status.status === 'fulfilled') state.status = status.value;
+      state.lastLoad = Date.now();
+      $('updated-at').textContent = `Updated at ${fmt.time(new Date())}`;
+      renderAll();
+      return;
+    }
+    if (state.view === 'omnisend') {
+      const g = $('om-granularity').value;
+      const [om, status] = await Promise.allSettled([
+        api('/api/omnisend', g === 'auto' ? params : { ...params, granularity: g }),
+        api('/api/status'),
+      ]);
+      if (om.status === 'fulfilled') state.omnisend = om.value; else state.errors.push(errorText('Omnisend', om.reason));
+      if (status.status === 'fulfilled') state.status = status.value;
+      state.lastLoad = Date.now();
+      $('updated-at').textContent = `Updated at ${fmt.time(new Date())}`;
+      renderAll();
+      return;
+    }
+    if (state.view === 'onesignal') {
+      const g = $('os-daily-granularity').value;
+      const p = { ...params, kind: $('os-kind').value };
+      const [res, status] = await Promise.allSettled([
+        api('/api/onesignal', g === 'auto' ? p : { ...p, granularity: g }),
+        api('/api/status'),
+      ]);
+      if (res.status === 'fulfilled') state.onesignal = res.value; else state.errors.push(errorText('OneSignal', res.reason));
+      if (status.status === 'fulfilled') state.status = status.value;
+      state.lastLoad = Date.now();
+      $('updated-at').textContent = `Updated at ${fmt.time(new Date())}`;
+      renderAll();
+      return;
+    }
+    if (state.view === 'maps') {
+      const g = $('maps-granularity').value;
+      const p = { ...params, brand: $('maps-brand').value };
+      const [mp, status] = await Promise.allSettled([
+        api('/api/maps', g === 'auto' ? p : { ...p, granularity: g }),
+        api('/api/status'),
+      ]);
+      if (mp.status === 'fulfilled') state.maps = mp.value; else state.errors.push(errorText('Google Maps', mp.reason));
+      if (status.status === 'fulfilled') state.status = status.value;
+      state.lastLoad = Date.now();
+      $('updated-at').textContent = `Updated at ${fmt.time(new Date())}`;
+      renderAll();
+      return;
+    }
+    if (state.view === 'dataedge') {
+      const g = $('de-granularity').value;
+      const p = params;
+      const [de, status] = await Promise.allSettled([
+        api('/api/dataedge', g === 'auto' ? p : { ...p, granularity: g }),
+        api('/api/status'),
+      ]);
+      if (de.status === 'fulfilled') state.dataedge = de.value; else state.errors.push(errorText('Data Edge', de.reason));
+      if (status.status === 'fulfilled') state.status = status.value;
+      state.lastLoad = Date.now();
+      $('updated-at').textContent = `Updated at ${fmt.time(new Date())}`;
+      renderAll();
+      return;
+    }
+    if (state.view === 'seo') {
+      const g = $('gsc-granularity').value;
+      const [gsc, status, ahrefs] = await Promise.allSettled([
+        features().gsc ? api('/api/gsc', g === 'auto' ? params : { ...params, granularity: g }) : Promise.resolve({ available: false }),
+        api('/api/status'),
+        features().ahrefs ? api('/api/ahrefs', { ...params, device: $('ah-device').value }) : Promise.resolve({ available: false }),
+      ]);
+      if (gsc.status === 'fulfilled') state.gsc = gsc.value; else state.errors.push(errorText('Search Console', gsc.reason));
+      if (ahrefs.status === 'fulfilled') state.ahrefs = ahrefs.value; else state.errors.push(errorText('Ahrefs', ahrefs.reason));
+      if (status.status === 'fulfilled') state.status = status.value;
+      state.lastLoad = Date.now();
+      $('updated-at').textContent = `Updated at ${fmt.time(new Date())}`;
+      renderAll();
+      return;
+    }
+    const dp = dailyParams(f);
+    const dayParams = { ...params, granularity: 'day' };
+    const results = await Promise.allSettled([
+      api('/api/summary', params),
+      api('/api/daily', dp),
+      api('/api/campaigns', params),
+      api('/api/changes', params).catch(() => null),
+      loadBudget(),
+      api('/api/status'),
+      features().monthly ? api('/api/monthly', params) : Promise.resolve(null),
+      dp.granularity === 'day' ? Promise.resolve(null) : api('/api/daily', dayParams),
+      // Разбивки — на вкладках Meta и Google Ads; у варианта с сервером их нет (ошибка → блок скрыт).
+      breakdownsFor(state.view).length && !f.partner
+        ? Promise.all(breakdownsFor(state.view).map((dimension) => api('/api/breakdown', { ...params, dimension })))
+        : Promise.resolve(null),
+      state.view === 'admixer' && features().placements ? api('/api/admixer/placements', params) : Promise.resolve(null),
+      state.view === 'admixer' && features().creatives ? api('/api/admixer/creatives', params) : Promise.resolve(null),
+      (state.view === 'meta' || state.view === 'google') && features().adsets ? api('/api/adsets', params) : Promise.resolve(null),
+      state.view === 'meta' && features().metaFunnel ? api('/api/meta/funnel', params) : Promise.resolve(null),
+      state.view === 'meta' && features().metaReach ? api('/api/meta/reach', params) : Promise.resolve(null),
+      state.view === 'meta' && features().metaQuality ? api('/api/meta/quality', params) : Promise.resolve(null),
+      state.view === 'meta' && features().metaVideos ? api('/api/meta/videos', params) : Promise.resolve(null),
+      state.view === 'overview' && features().ga4 ? api('/api/ga4', gaParams(params)) : Promise.resolve(null),
+      state.view === 'meta' && features().metaAds ? api('/api/meta/ads', params) : Promise.resolve(null),
+      state.view === 'google' && features().googleSearch ? api('/api/google/impression-share', params) : Promise.resolve(null),
+      state.view === 'google' && features().googleSearch ? api('/api/google/search-terms', params) : Promise.resolve(null),
+      state.view === 'meta' && features().metaEmq ? api('/api/meta/emq', params) : Promise.resolve(null),
+    ]);
+    const [summary, daily, campaigns, changes, budget, status, monthly, days, breakdowns, placements, creatives, adsets, metaFunnel, metaReach, metaQuality, metaVideos, ga, metaAds, share, terms, emq] = results;
+    if (summary.status === 'fulfilled') state.summary = summary.value; else state.errors.push(errorText('Summary', summary.reason));
+    if (daily.status === 'fulfilled') state.daily = daily.value; else state.errors.push(errorText('Trend', daily.reason));
+    if (days.status === 'fulfilled') state.days = days.value ?? state.daily; else state.errors.push(errorText('Daily', days.reason));
+    if (campaigns.status === 'fulfilled') state.campaigns = campaigns.value; else state.errors.push(errorText('Campaigns', campaigns.reason));
+    state.changes = changes.status === 'fulfilled' ? changes.value : null;
+    if (budget.status === 'rejected') state.errors.push(errorText('Budget', budget.reason));
+    if (status.status === 'fulfilled') state.status = status.value;
+    if (monthly.status === 'fulfilled') state.monthly = monthly.value; else state.errors.push(errorText('Monthly', monthly.reason));
+    state.breakdowns = breakdowns.status === 'fulfilled' && breakdowns.value
+      ? Object.fromEntries(breakdowns.value.map((b) => [b.dimension, b]))
+      : null;
+    if (ga.status === 'fulfilled') state.ga = ga.value;
+    else { state.ga = null; state.errors.push(errorText('GA4', ga.reason)); }
+    if (placements.status === 'fulfilled') state.placements = placements.value;
+    else { state.placements = null; state.errors.push(errorText('Placements', placements.reason)); }
+    state.metaFunnel = metaFunnel.status === 'fulfilled' ? metaFunnel.value : null;
+    if (metaFunnel.status === 'rejected') state.errors.push(errorText('Meta funnel', metaFunnel.reason));
+    state.metaReach = metaReach.status === 'fulfilled' ? metaReach.value : null;
+    if (metaReach.status === 'rejected') state.errors.push(errorText('Meta reach', metaReach.reason));
+    state.metaQuality = metaQuality.status === 'fulfilled' ? metaQuality.value : null;
+    state.metaAds = metaAds.status === 'fulfilled' ? metaAds.value : null;
+    if (metaAds.status === 'rejected') state.errors.push(errorText('Meta ads', metaAds.reason));
+    state.share = share.status === 'fulfilled' ? share.value : null;
+    if (share.status === 'rejected') state.errors.push(errorText('Impression share', share.reason));
+    state.terms = terms.status === 'fulfilled' ? terms.value : null;
+    if (terms.status === 'rejected') state.errors.push(errorText('Search terms', terms.reason));
+    state.emq = emq.status === 'fulfilled' ? emq.value : null;
+    if (emq.status === 'rejected') state.errors.push(errorText('Event match quality', emq.reason));
+    state.metaVideos = metaVideos.status === 'fulfilled' ? metaVideos.value : null;
+    if (metaVideos.status === 'rejected') state.errors.push(errorText('Meta video', metaVideos.reason));
+    if (metaQuality.status === 'rejected') state.errors.push(errorText('Meta ad quality', metaQuality.reason));
+    if (adsets.status === 'fulfilled') state.adsets = adsets.value;
+    else { state.adsets = null; state.errors.push(errorText('Ad sets', adsets.reason)); }
+    if (creatives.status === 'fulfilled') state.creatives = creatives.value;
+    else { state.creatives = null; state.errors.push(errorText('Creatives', creatives.reason)); }
+    state.lastLoad = Date.now();
+    $('updated-at').textContent = `Updated at ${fmt.time(new Date())}`;
+    renderAll();
+  } finally {
+    $('app').classList.remove('loading');
+    loading = false;
+    if (reloadQueued) {
+      reloadQueued = false;
+      loadAll();
+    }
+  }
+}
+
+// ---------- CSV ----------
+
+function exportCsv() {
+  const rows = visibleCampaigns();
+  const f = state.filters;
+  const columns = [
+    { title: 'Platform', type: 'text', value: (r) => PLATFORM_LABELS[r.platform] },
+    { title: 'Account', type: 'text', value: (r) => r.account_id },
+    { title: 'Campaign ID', type: 'text', value: (r) => r.campaign_id },
+    { title: 'Campaign', type: 'text', value: (r) => r.name },
+    { title: 'Brand', type: 'text', value: (r) => r.brand },
+    { title: 'Goal', type: 'text', value: (r) => goalLabel(r) },
+    { title: 'Spend, MDL', type: 'number', digits: 2, value: (r) => r.spend },
+    { title: 'Revenue, MDL', type: 'number', digits: 2, value: (r) => r.revenue },
+    { title: 'ROAS', type: 'number', digits: 4, value: (r) => value('roas', r) },
+    { title: 'Conversions', type: 'number', digits: 2, value: (r) => r.conversions },
+    { title: 'CPA, MDL', type: 'number', digits: 2, value: (r) => value('cpa', r) },
+    { title: 'Impressions', type: 'number', digits: 0, value: (r) => r.impressions },
+    { title: 'Clicks', type: 'number', digits: 0, value: (r) => r.clicks },
+    { title: 'CTR, %', type: 'number', digits: 4, value: (r) => (value('ctr', r) === null ? null : value('ctr', r) * 100) },
+    { title: 'CPC, MDL', type: 'number', digits: 2, value: (r) => value('cpc', r) },
+    { title: 'CPM, MDL', type: 'number', digits: 2, value: (r) => value('cpm', r) },
+  ];
+  download(buildCsv(columns, rows), `ff-ads-kampanii_${f.from}_${f.to}.csv`);
+}
+
+// ---------- Инициализация ----------
+
+function buildMonthOptions() {
+  const today = state.config.today;
+  const current = today.slice(0, 7);
+  const options = [];
+  const back = features().budgetMonthsBack ?? 12;
+  for (let i = 1; i >= -back; i--) {
+    const ym = addMonths(today, i).slice(0, 7);
+    options.push(el('option', { value: ym, text: fmt.monthName(ym), selected: ym === current }));
+  }
+  $('budget-month').replaceChildren(...options);
+}
+
+// ---------- Вкладки ----------
+
+function renderTabs() {
+  for (const tab of document.querySelectorAll('#tabs .tab')) {
+    tab.setAttribute('aria-selected', String(tab.dataset.view === state.view));
+  }
+  // Вкладки Shopify и Omnisend — только если в данных есть магазин / push-кампании.
+  document.querySelector('#tabs .tab[data-view="shopify"]').hidden = !features().shopify;
+  document.querySelector('#tabs .tab[data-view="omnisend"]').hidden = !features().omnisend;
+  document.querySelector('#tabs .tab[data-view="seo"]').hidden = !features().gsc && !features().ahrefs;
+  document.querySelector('#tabs .tab[data-view="dataedge"]').hidden = !features().dataedge;
+  document.querySelector('#tabs .tab[data-view="maps"]').hidden = !features().maps;
+  document.querySelector('#tabs .tab[data-view="onesignal"]').hidden = !features().onesignal;
+  document.querySelector('#tabs .tab[data-view="team"]').hidden = !features().agent;
+  $('platforms-field').hidden = state.view !== 'overview';
+  $('app').dataset.view = state.view;
+  fillPartnerOptions();
+  const name = { shopify: 'Shopify', omnisend: 'Omnisend', seo: 'SEO', dataedge: 'SMS / Viber', maps: 'Google Maps', onesignal: 'App push', team: 'Team' }[state.view] ?? PLATFORM_LABELS[state.view];
+  document.title = state.view === 'overview' ? 'FF Ads Dashboard' : `${name} — FF Ads Dashboard`;
+}
+
+function setView(next) {
+  if (!Object.hasOwn(VIEWS, next) || next === state.view) return;
+  if ((next === 'shopify' && !features().shopify) || (next === 'omnisend' && !features().omnisend) || (next === 'seo' && !features().gsc && !features().ahrefs) || (next === 'dataedge' && !features().dataedge) || (next === 'maps' && !features().maps) || (next === 'onesignal' && !features().onesignal) || (next === 'team' && !features().agent)) return;
+  state.view = next;
+  state.insightsAll = false;
+  if (!view().metrics.includes(state.sort.key) && !['name', 'brand', 'platform'].includes(state.sort.key)) state.sort = { key: 'spend', dir: 'desc' };
+  if (next !== 'overview' && state.sort.key === 'platform') state.sort = { key: 'spend', dir: 'desc' };
+  renderTabs();
+  fillMetricSelects();
+  window.scrollTo({ top: 0 });
+  loadAll();
+}
+
+function bindEvents() {
+  $('dq-badge').addEventListener('click', (e) => {
+    e.stopPropagation();
+    toggleDqPop();
+  });
+  document.addEventListener('click', (e) => {
+    if (!$('dq-pop').hidden && !$('dq').contains(e.target)) toggleDqPop(false);
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && !$('dq-pop').hidden) {
+      toggleDqPop(false);
+      $('dq-badge').focus();
+    }
+  });
+  $('team-report').addEventListener('change', () => renderTeam());
+  // Отметки подсказок (карточки KPI, таблица кампаний) и ссылка «Reports» в блоке подсказок.
+  $('app').addEventListener('click', (e) => {
+    const mark = e.target.closest('.insight-mark');
+    if (mark) {
+      e.preventDefault();
+      e.stopPropagation();
+      toggleInsightPop(mark);
+      return;
+    }
+    const go = e.target.closest('[data-goto]');
+    if (go) {
+      e.preventDefault();
+      setView(go.dataset.goto);
+    }
+  });
+  // Мини-окна подсказок (вне #app, поверх страницы): × — закрыть до перезагрузки, «All insights» — к блоку подсказок.
+  // Клик мимо окна или Esc закрывает окно, открытое по отметке.
+  document.addEventListener('click', (e) => {
+    const box = e.target.closest('.insight-pop');
+    if (!box) {
+      if (!e.target.closest('.insight-mark')) closeInsightPops((p) => !p.auto);
+      return;
+    }
+    if (e.target.closest('.insight-close')) {
+      const p = insightPops.find((x) => x.box === box);
+      if (p?.auto) closedInsights.add(box.dataset.insight);
+      const anchor = p && !p.auto ? p.anchor : null;
+      closeInsightPops((x) => x.box === box);
+      anchor?.focus({ preventScroll: true });
+      return;
+    }
+    const all = e.target.closest('[data-show-insight]');
+    if (all) {
+      e.preventDefault();
+      closeInsightPops((p) => !p.auto);
+      showInsight(all.dataset.showInsight);
+    }
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape') return;
+    const p = [...insightPops].reverse().find((x) => !x.auto);
+    if (!p) return;
+    closeInsightPops((x) => x === p);
+    p.anchor.focus({ preventScroll: true });
+  });
+  // Окна привязаны к блокам: при изменении размеров страницы — заново по месту.
+  window.addEventListener('resize', () => placeInsightPops());
+  if (typeof ResizeObserver === 'function') new ResizeObserver(() => placeInsightPops()).observe($('app'));
+  $('insights-more').addEventListener('click', () => {
+    state.insightsAll = !state.insightsAll;
+    renderInsights();
+  });
+  $('tabs').addEventListener('click', (e) => {
+    const tab = e.target.closest('.tab');
+    if (tab) setView(tab.dataset.view);
+  });
+  $('tabs').addEventListener('keydown', (e) => {
+    if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft') return;
+    const tabs = [...document.querySelectorAll('#tabs .tab')].filter((t) => !t.hidden);
+    const i = tabs.findIndex((t) => t.dataset.view === state.view);
+    const next = tabs[(i + (e.key === 'ArrowRight' ? 1 : tabs.length - 1)) % tabs.length];
+    next.focus();
+    setView(next.dataset.view);
+  });
+  $('platforms').addEventListener('click', (e) => {
+    const card = e.target.closest('.platform-card');
+    if (card) setView(card.dataset.view);
+  });
+  $('period').addEventListener('change', () => { syncPeriodInputs(); loadAll(); });
+  for (const id of ['from', 'to']) $(id).addEventListener('change', () => { syncPeriodInputs(); loadAll(); });
+  for (const box of document.querySelectorAll('input[name="platform"]')) box.addEventListener('change', loadAll);
+  $('brand').addEventListener('change', loadAll);
+  $('partner').addEventListener('change', loadAll);
+  $('refresh').addEventListener('click', loadAll);
+  $('budget-month').addEventListener('change', async () => {
+    try {
+      await loadBudget();
+      renderBudget();
+    } catch (err) {
+      state.errors = [errorText('Budget', err)];
+      renderAlerts();
+    }
+  });
+  $('daily-metric').addEventListener('change', () => state.daily && charts.daily($('daily-metric').value, state.daily, state.filters.platforms));
+  if (features().yoy) $('compare').addEventListener('change', loadAll);
+  if (features().granularity) $('granularity').addEventListener('change', loadAll);
+  $('monthly-csv')?.addEventListener('click', exportMonthlyCsv);
+  $('share-metric').addEventListener('change', () => state.summary && charts.share($('share-metric').value, state.summary.current.byPlatform, state.filters.platforms));
+  $('compare-metric').addEventListener('change', () => state.summary && charts.compare($('compare-metric').value, state.summary, state.filters.platforms));
+  $('bubble-metric').addEventListener('change', () => state.campaigns && charts.bubble($('bubble-metric').value, state.campaigns.rows, state.filters.platforms));
+  $('campaign-search').addEventListener('input', (e) => { state.search = e.target.value; renderTable(); });
+  $('campaigns-table').tHead.addEventListener('click', (e) => {
+    const key = e.target.closest('button')?.dataset.key;
+    if (!key) return;
+    state.sort = state.sort.key === key
+      ? { key, dir: state.sort.dir === 'asc' ? 'desc' : 'asc' }
+      : { key, dir: tableColumns().find((c) => c.key === key).type === 'text' ? 'asc' : 'desc' };
+    renderTable();
+  });
+  $('csv-export').addEventListener('click', exportCsv);
+  $('shop-products-csv').addEventListener('click', exportShopProductsCsv);
+  $('placements-csv').addEventListener('click', exportPlacementsCsv);
+  $('creatives-csv').addEventListener('click', exportCreativesCsv);
+  $('adsets-csv').addEventListener('click', exportAdsetsCsv);
+  $('video-csv').addEventListener('click', exportVideosCsv);
+  $('quality-below').addEventListener('change', (e) => { state.qualityBelow = e.target.checked; renderQuality(); });
+  $('fatigue-flagged').addEventListener('change', (e) => { state.fatigueFlagged = e.target.checked; renderFatigue(); });
+  $('share-lost').addEventListener('change', (e) => { state.shareLost = e.target.checked; renderShare(); });
+  $('terms-waste').addEventListener('change', (e) => { state.termsWaste = e.target.checked; renderTerms(); });
+  $('adsets-search').addEventListener('input', (e) => { state.adsetsSearch = e.target.value; renderAdsets(); });
+  $('adsets-table').tHead.addEventListener('click', (e) => {
+    const key = e.target.closest('button')?.dataset.key;
+    if (!key) return;
+    state.adsetsSort = state.adsetsSort.key === key
+      ? { key, dir: state.adsetsSort.dir === 'asc' ? 'desc' : 'asc' }
+      : { key, dir: adsetColumns().find((c) => c.key === key)?.type === 'text' ? 'asc' : 'desc' };
+    renderAdsets();
+  });
+  $('creatives-search').addEventListener('input', (e) => { state.creativesSearch = e.target.value; renderCreatives(); });
+  $('creatives-table').tHead.addEventListener('click', (e) => {
+    const key = e.target.closest('button')?.dataset.key;
+    if (!key) return;
+    const col = creativeColumns().find((c) => c.key === key);
+    state.creativesSort = state.creativesSort.key === key
+      ? { key, dir: state.creativesSort.dir === 'asc' ? 'desc' : 'asc' }
+      : { key, dir: col.type === 'text' ? 'asc' : 'desc' };
+    renderCreatives();
+  });
+  $('placements-search').addEventListener('input', (e) => { state.placementsSearch = e.target.value; renderPlacements(); });
+  $('placements-group').addEventListener('change', renderPlacements);
+  $('placements-table').tHead.addEventListener('click', (e) => {
+    const key = e.target.closest('button')?.dataset.key;
+    if (!key) return;
+    const col = placementColumns().find((c) => c.key === key);
+    state.placementsSort = state.placementsSort.key === key
+      ? { key, dir: state.placementsSort.dir === 'asc' ? 'desc' : 'asc' }
+      : { key, dir: col.type === 'text' ? 'asc' : 'desc' };
+    renderPlacements();
+  });
+  $('shop-product-search').addEventListener('input', (e) => { state.shopSearch = e.target.value; renderShopProducts(); });
+  $('shop-granularity').addEventListener('change', loadAll);
+  $('om-granularity').addEventListener('change', loadAll);
+  $('ga-granularity').addEventListener('change', loadAll);
+  $('ga-csv').addEventListener('click', exportGaCsv);
+  $('om-csv').addEventListener('click', exportOmnisendCsv);
+  $('gsc-granularity').addEventListener('change', loadAll);
+  $('ah-device').addEventListener('change', loadAll);
+  $('ah-filter').addEventListener('change', renderAhKeywords);
+  $('ah-csv').addEventListener('click', exportAhrefsCsv);
+  $('ah-search').addEventListener('input', (e) => { state.ahSearch = e.target.value; renderAhKeywords(); });
+  $('ah-keywords').tHead.addEventListener('click', (e) => {
+    const key = e.target.closest('button')?.dataset.key;
+    if (!key) return;
+    state.ahSort = state.ahSort.key === key ? { key, dir: state.ahSort.dir === 'asc' ? 'desc' : 'asc' } : { key, dir: ['keyword', 'url', 'position'].includes(key) ? 'asc' : 'desc' };
+    renderAhKeywords();
+  });
+  $('os-daily-granularity').addEventListener('change', loadAll);
+  $('os-journeys').tHead.addEventListener('click', (e) => {
+    const key = e.target.closest('button')?.dataset.key;
+    if (!key) return;
+    const cur = state.osJourneySort;
+    state.osJourneySort = cur.key === key ? { key, dir: cur.dir === 'asc' ? 'desc' : 'asc' } : { key, dir: ['name', 'status'].includes(key) ? 'asc' : 'desc' };
+    renderOsJourneys();
+  });
+  $('os-kind').addEventListener('change', loadAll);
+  $('os-csv').addEventListener('click', exportOneSignalCsv);
+  $('os-search').addEventListener('input', (e) => { state.osSearch = e.target.value; renderOsMessages(); });
+  $('os-messages').tHead.addEventListener('click', (e) => {
+    const key = e.target.closest('button')?.dataset.key;
+    if (!key) return;
+    const col = osColumns().find((c) => c.key === key);
+    state.osSort = state.osSort.key === key
+      ? { key, dir: state.osSort.dir === 'asc' ? 'desc' : 'asc' }
+      : { key, dir: col.type === 'text' && key !== 'date' ? 'asc' : 'desc' };
+    renderOsMessages();
+  });
+  $('maps-granularity').addEventListener('change', loadAll);
+  $('maps-brand').addEventListener('change', loadAll);
+  $('maps-csv').addEventListener('click', exportMapsCsv);
+  $('maps-search').addEventListener('input', (e) => { state.mapsSearch = e.target.value; renderMapsLocations(); });
+  $('maps-review-filter').addEventListener('change', renderMapsReviews);
+  for (const [name, [columns, render]] of Object.entries(MAPS_TABLES)) {
+    $(`maps-${name}`).tHead.addEventListener('click', (e) => {
+      const key = e.target.closest('button')?.dataset.key;
+      if (!key) return;
+      const col = columns().find((c) => c.key === key);
+      const cur = state.mapsSort[name];
+      state.mapsSort[name] = cur.key === key
+        ? { key, dir: cur.dir === 'asc' ? 'desc' : 'asc' }
+        : { key, dir: col.type === 'text' && key !== 'date' ? 'asc' : 'desc' };
+      render();
+    });
+  }
+  $('de-granularity').addEventListener('change', loadAll);
+  $('de-csv').addEventListener('click', exportDataEdgeCsv);
+  $('de-search').addEventListener('input', (e) => { state.deSearch = e.target.value; renderDeMailings(); });
+  $('de-mailings').tHead.addEventListener('click', (e) => {
+    const key = e.target.closest('button')?.dataset.key;
+    if (!key) return;
+    const col = deColumns().find((c) => c.key === key);
+    state.deSort = state.deSort.key === key
+      ? { key, dir: state.deSort.dir === 'asc' ? 'desc' : 'asc' }
+      : { key, dir: col.type === 'text' && key !== 'date' ? 'asc' : 'desc' };
+    renderDeMailings();
+  });
+  $('gsc-csv').addEventListener('click', exportGscCsv);
+  $('gsc-search').addEventListener('input', (e) => { state.gscSearch = e.target.value; renderGscTable('query', 'gsc-queries', 'gsc-queries-count'); });
+  $('gsc-query-type').addEventListener('change', () => renderGscTable('query', 'gsc-queries', 'gsc-queries-count'));
+  $('gsc-tiles').addEventListener('click', (e) => {
+    const key = e.target.closest('.gsc-tile:not([disabled])')?.dataset.key;
+    if (!key) return;
+    state.gscMetrics = state.gscMetrics.includes(key) ? state.gscMetrics.filter((k) => k !== key) : [...state.gscMetrics, key];
+    renderSeo();
+  });
+  for (const [dim, table, count] of [['query', 'gsc-queries', 'gsc-queries-count'], ['page', 'gsc-pages', 'gsc-pages-count'], ['country', 'gsc-countries', null]]) {
+    $(table).tHead.addEventListener('click', (e) => {
+      const key = e.target.closest('button')?.dataset.key;
+      if (!key) return;
+      const cur = state.gscSort[dim];
+      state.gscSort[dim] = cur.key === key ? { key, dir: cur.dir === 'asc' ? 'desc' : 'asc' } : { key, dir: key === 'key' ? 'asc' : 'desc' };
+      renderGscTable(dim, table, count);
+    });
+  }
+  $('om-search').addEventListener('input', (e) => { state.omSearch = e.target.value; renderOmCampaigns(); });
+  $('om-campaigns').tHead.addEventListener('click', (e) => {
+    const key = e.target.closest('button')?.dataset.key;
+    if (!key) return;
+    const col = omColumns().find((c) => c.key === key);
+    state.omSort = state.omSort.key === key
+      ? { key, dir: state.omSort.dir === 'asc' ? 'desc' : 'asc' }
+      : { key, dir: col.type === 'text' ? 'asc' : 'desc' };
+    renderOmCampaigns();
+  });
+  $('theme-toggle').addEventListener('click', () => {
+    window.ffadsTheme.toggle();
+    if (state.view === 'shopify') renderShopifyCharts();
+    else if (state.view === 'omnisend') renderOmnisendCharts();
+    else if (state.view === 'seo') { renderSeoCharts(); renderAhrefsCharts(); }
+    else if (state.view === 'dataedge') renderDataEdgeCharts();
+    else if (state.view === 'maps') renderMapsCharts();
+    else if (state.view === 'onesignal') renderOneSignalCharts();
+    else { renderCharts(); renderBreakdowns(); renderGaCharts(); }
+  });
+  document.fonts?.ready.then(() => { charts.setup(); renderCharts(); });
+  window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', renderCharts);
+}
+
+function startAutoRefresh() {
+  const periodMs = state.config.refreshSeconds * 1000;
+  setInterval(() => {
+    if (!document.hidden) loadAll();
+  }, periodMs);
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden && Date.now() - state.lastLoad > periodMs) loadAll();
+  });
+}
+
+async function init() {
+  charts.setup();
+  restoreViewFromUrl();
+  renderTabs();
+  fillMetricSelects();
+  renderTableHead();
+  try {
+    state.config = await api('/api/config');
+  } catch (err) {
+    state.filters = { platforms: [] };
+    state.errors = [errorText('Could not load settings', err)];
+    renderAlerts();
+    return;
+  }
+  $('from').max = state.config.today;
+  $('to').max = state.config.today;
+  if (state.config.dataFrom) { $('from').min = state.config.dataFrom; $('to').min = state.config.dataFrom; }
+  $('compare-field').hidden = !features().yoy;
+  // Вкладка Shopify из адреса — только если магазин есть в данных.
+  if (state.view === 'shopify' && !features().shopify) state.view = 'overview';
+  if (state.view === 'omnisend' && !features().omnisend) state.view = 'overview';
+  if (state.view === 'seo' && !features().gsc && !features().ahrefs) state.view = 'overview';
+  if (state.view === 'dataedge' && !features().dataedge) state.view = 'overview';
+  if (state.view === 'maps' && !features().maps) state.view = 'overview';
+  if (state.view === 'onesignal' && !features().onesignal) state.view = 'overview';
+  if (state.view === 'team' && !features().agent) state.view = 'overview';
+  renderTabs();
+  $('granularity-field').hidden = !features().granularity;
+  fillPartnerOptions();
+  restoreFiltersFromUrl();
+  buildMonthOptions();
+  syncPeriodInputs();
+  bindEvents();
+  await loadAll();
+  startAutoRefresh();
+  loadStatus();
+}
+
+init();
